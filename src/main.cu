@@ -114,22 +114,24 @@ static void conv_forward_valid(const float *X, const int xdims[4],
                                const int ydims[4]) {
   const auto filter_h   = wdims[0];
   const auto filter_w   = wdims[1];
-  const auto in_channel = wdims[2]; 
+  const auto in_channel = wdims[2];
+  auto getWIdx = [wdims] (int p, int q, int c, int m) {
+      return p * wdims[1] * wdims[2] * wdims[3] +
+             q * wdims[2] * wdims[3] + c * wdims[3] + m;};
+  auto getXIdx = [xdims] (int i, int y, int x, int z) {
+      return i * xdims[1] * xdims[2] * xdims[3] + y * xdims[2] * xdims[3] + x * xdims[3] + z;
+  };
+  auto getYIdx = [ydims] (int i, int row, int col, int num_feature_map) {
+    return ((i * ydims[1] + row) * ydims[2] + col) * ydims[3] + num_feature_map;
+  };
   for (const auto i : range(0, ydims[0])) { //FLAGS_BATCH_SIZE ??
-    for (const auto m : range(0, ydims[3])) { 
-      for (const auto w : range(0, ydims[2])) {
-        for (const auto h : range(0, ydims[1])) {
-          for (const auto p : range(0, filter_h)) {
+    for (const auto m : range(0, ydims[3])) { // for each output feature map
+      for (const auto w : range(0, ydims[2])) { // for each output element
+        for (const auto h : range(0, ydims[1])) {   
+          for (const auto p : range(0, filter_h)) { // apply filter
             for (const auto q : range(0, filter_w)) {
-              for (const auto c : range(0, in_channel)) {
-                const auto yoffset =
-                    ((i * ydims[1] + h) * ydims[2] + w) * ydims[3] + m;
-                const auto xoffset = i * xdims[1] * xdims[2] * xdims[3] +
-                                     (h + p) * xdims[2] * xdims[3] +
-                                     (w + q) * xdims[3] + c;
-                const auto woffset = p * wdims[1] * wdims[2] * wdims[3] +
-                                     q * wdims[2] * wdims[3] + c * wdims[3] + m;
-                Y[yoffset] += X[xoffset] * W[woffset];
+              for (const auto c : range(0, in_channel)) {  
+                Y[getYIdx(i,h,w,m)] += X[getXIdx(i, h+p, w+q, c)] * W[getWIdx(p,q,c,m)];
               }
             }
           }
@@ -140,26 +142,30 @@ static void conv_forward_valid(const float *X, const int xdims[4],
 }
 //Y is output, X is input, W is the convolution mask
 //XYZ Dims: Dimensions -- width, height, depth
+//@TODO figure out the translation of indices from sequential code 
 __global__ void easyConv (const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
                                const int ydims[4]){
-const int filter_h   = wdims[0];
-const int filter_w   = wdims[1];
-const int 
+ const auto filter_h   = wdims[0];
+  const auto filter_w   = wdims[1];
+  const auto in_channel = wdims[2];
 
-int n, m, h, w, c, p, q;
-n = blockIdx.x;
-m = blockIdx.y;
-h = blockIdx.z / W_grid + threadIdx.y;
-w = blockIdx.z % W_grid + threadIdx.x;
-float acc = 0.;
-for (c = 0;  c < C; c++) { // sum over all input channels
+  int n, m, h, w, c, p, q;
+  n = blockIdx.x;
+  m = blockIdx.y;
+  h = blockIdx.z / W_grid + threadIdx.y;
+  w = blockIdx.z % W_grid + threadIdx.x;
+
+  float acc = 0.0;
   for (p = 0; p < filter_h; p++){ // loop over KxK  filter
     for (q = 0; q < filter_w; q++){  
-      acc = acc + X[n, c, h + p, w + q] * W[m, c, p, q];
+      for (c = 0;  c < in_channel; c++) { // sum over all input channels      
+        
+          //acc = acc + X[n, c, h + p, w + q] * W[m, c, p, q];
+      }
     }
   }
-Y[n, m, h, w] = acc;
+  Y[n, m, h, w] = acc;   
         
 }
 
