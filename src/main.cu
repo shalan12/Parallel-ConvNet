@@ -27,8 +27,8 @@ static int xdims[] = {FLAGS_batch_size, NUM_ROWS, NUM_COLS, NUM_CHANNELS};
 static int rdims[] = {FLAGS_batch_size, NUM_DIGITS};
 
 // Model dimensions
-static int conv1dims[] = {5, 5, 1, 32};
-static int conv2dims[] = {5, 5, 32, 64};
+static int conv1dims[] = {5, 5, 1, 32}; // rows, cols, ?, ?
+static int conv2dims[] = {5, 5, 32, 64}; // rows, cols, ?, ?
 static int fc1dims[]   = {1024, 128};
 static int fc2dims[]   = {128, 10};
 
@@ -37,7 +37,7 @@ static int loadData(float *x, float *y) {
   const auto file_id =
       H5Fopen(FLAGS_testdata.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
 
-  // Open the dataset x and y
+  // Open the dataset x and y (x is input, y is output)
   const auto x_id = H5Dopen2(file_id, "/x", H5P_DEFAULT);
   const auto y_id = H5Dopen2(file_id, "/y", H5P_DEFAULT);
 
@@ -105,15 +105,18 @@ static void loadModel(float *conv1, float *conv2, float *fc1, float *fc2) {
 
 
 // From book chapter Figure 16.4
+//*X in the input tensor
+//*W is the tensor of masks
+// wdims is either conv1dims or conv2dims
+//*Y is the output after the convolution, ydims is the dimensions of the output tensor
 static void conv_forward_valid(const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
                                const int ydims[4]) {
   const auto filter_h   = wdims[0];
   const auto filter_w   = wdims[1];
-  const auto in_channel = wdims[2];
-
-  for (const auto i : range(0, ydims[0])) {
-    for (const auto m : range(0, ydims[3])) {
+  const auto in_channel = wdims[2]; 
+  for (const auto i : range(0, ydims[0])) { //FLAGS_BATCH_SIZE ??
+    for (const auto m : range(0, ydims[3])) { 
       for (const auto w : range(0, ydims[2])) {
         for (const auto h : range(0, ydims[1])) {
           for (const auto p : range(0, filter_h)) {
@@ -315,8 +318,8 @@ int main(int argc, char **argv) {
   } else if (argc == 4) {
     FLAGS_batch_size = atoi(argv[3]);
   }
-  xdims[0] = FLAGS_batch_size;
-  rdims[0] = FLAGS_batch_size;
+  xdims[0] = FLAGS_batch_size; // number of images
+  rdims[0] = FLAGS_batch_size; // number of images
 
   // Load data into x and y
   float *x = allocate<float>(xdims);
