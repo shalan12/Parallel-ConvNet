@@ -16,6 +16,7 @@
 #define NUM_COLS 28
 #define NUM_CHANNELS 1
 #define NUM_DIGITS 10
+#define TILE_SIZE 16
 
 static int FLAGS_batch_size = 10000;
 static std::string FLAGS_testdata{};
@@ -101,6 +102,8 @@ static void loadModel(float *conv1, float *conv2, float *fc1, float *fc2) {
   check_success(H5Fclose(file_id));
 }
 
+
+
 // From book chapter Figure 16.4
 static void conv_forward_valid(const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
@@ -131,6 +134,30 @@ static void conv_forward_valid(const float *X, const int xdims[4],
       }
     }
   }
+}
+//Y is output, X is input, W is the convolution mask
+//XYZ Dims: Dimensions -- width, height, depth
+__global__ void easyConv (const float *X, const int xdims[4],
+                               const float *W, const int wdims[4], float *Y,
+                               const int ydims[4]){
+const int filter_h   = wdims[0];
+const int filter_w   = wdims[1];
+const int 
+
+int n, m, h, w, c, p, q;
+n = blockIdx.x;
+m = blockIdx.y;
+h = blockIdx.z / W_grid + threadIdx.y;
+w = blockIdx.z % W_grid + threadIdx.x;
+float acc = 0.;
+for (c = 0;  c < C; c++) { // sum over all input channels
+  for (p = 0; p < filter_h; p++){ // loop over KxK  filter
+    for (q = 0; q < filter_w; q++){  
+      acc = acc + X[n, c, h + p, w + q] * W[m, c, p, q];
+    }
+  }
+Y[n, m, h, w] = acc;
+        
 }
 
 // Recified linear unit 4d
