@@ -35,7 +35,7 @@ static int fc2dims[]   = {128, 10}; // not important for convolution or subsampl
 void easyConvWrapper (const float *X, const int xdims[4], const float *W, const int wdims[4], float *Y, const int ydims[4]);
 __global__ void easyConv (const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
-                               const int ydims[4], int W_grid);
+                               const int ydims[4], int* W_grid);
 
 static int loadData(float *x, float *y) {
   // Open the data file
@@ -152,7 +152,7 @@ static void conv_forward_valid(const float *X, const int xdims[4],
   }
 }
 
-int multiplyArr(int* arr, int n) {
+int multiplyArr(const int* arr, int n) {
   int prod = 1;
   
   for (int i = 0; i < n; i++) {
@@ -174,23 +174,50 @@ void easyConvWrapper(const float *X, const int xdims[4],
   const int Z = H_grid * W_grid;
   const dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
   const dim3 gridDim(N, M, Z);
+  
+  int * deviceW_Grid;
   float* deviceX;
   float* deviceY;
   float* deviceW;
-  float* deviceXDims;
-  float* deviceYDims;
-  float* deviceWDims;
-  easyConv<<<gridDim, blockDim>>>(X, xdims, W, wdims, Y, ydims, W_grid);
+  int* deviceXDims;
+  int* deviceYDims;
+  int* deviceWDims;
+  
+  int sizeX = multiplyArr(xdims, 4)*sizeof(float);
+  int sizeY = multiplyArr(ydims, 4)*sizeof(float);
+  int sizeW = multiplyArr(wdims, 4)*sizeof(float);
+
+  cudaMalloc(&deviceX, sizeX);
+  cudaMalloc(&deviceY, sizeY);
+  cudaMalloc(&deviceW, sizeW);
+  cudaMalloc(&deviceXDims, 4 * sizeof(int));
+  cudaMalloc(&deviceYDims, 4 * sizeof(int));
+  cudaMalloc(&deviceWDims, 4 * sizeof(int));
+  cudaMalloc(&deviceW_Grid, sizeof(int));
+  
+  cudaMemcpy(deviceX, X, sizeX, cudaMemcpyHostToDevice);
+  cudaMemcpy(deviceY, Y, sizeY, cudaMemcpyHostToDevice);
+  cudaMemcpy(deviceW, W, sizeW, cudaMemcpyHostToDevice);
+  cudaMemcpy(deviceXDims, xdims, 4 * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(deviceYDims, ydims, 4 * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(deviceWDims, wdims, 4 * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(deviceW_Grid, &W_grid, sizeof(int), cudaMemcpyHostToDevice);
+  
+  easyConv<<<gridDim, blockDim>>>(deviceX, deviceXDims, deviceW, deviceWDims, deviceY, deviceYDims, deviceW_Grid);
+
+  cudaMemcpy(Y, deviceY, sizeY, cudaMemcpyDeviceToHost);
+
+  //Free CUDA Memory
 }
 //Y is output, X is input, W is the convolution mask
 //XYZ Dims: Dimensions -- width, height, depth
 __global__ void easyConv (const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
-                               const int ydims[4], int W_grid){
+                               const int ydims[4], int* W_grid1){
   const auto filter_h  = wdims[0];
   const auto filter_w = wdims[1];
   const auto C = wdims[2];
-  
+  int W_grid = *W_grid1;
   auto getWIdx = [wdims] (int p, int q, int c, int m) {
       return p * wdims[1] * wdims[2] * wdims[3] +
              q * wdims[2] * wdims[3] + c * wdims[3] + m;};
