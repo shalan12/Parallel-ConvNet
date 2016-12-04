@@ -18,7 +18,7 @@
 #define NUM_DIGITS 10
 #define TILE_SIZE 16
 
-static int FLAGS_batch_size = 10000;
+static int FLAGS_batch_size = 10000; // number of images....actual value changes at runtime
 static std::string FLAGS_testdata{};
 static std::string FLAGS_model{};
 
@@ -27,10 +27,10 @@ static int xdims[] = {FLAGS_batch_size, NUM_ROWS, NUM_COLS, NUM_CHANNELS};
 static int rdims[] = {FLAGS_batch_size, NUM_DIGITS};
 
 // Model dimensions
-static int conv1dims[] = {5, 5, 1, 32}; // rows, cols, ?, ?
-static int conv2dims[] = {5, 5, 32, 64}; // rows, cols, ?, ?
-static int fc1dims[]   = {1024, 128};
-static int fc2dims[]   = {128, 10};
+static int conv1dims[] = {5, 5, 1, 32}; // rows, cols, #input_feature maps, #output_feature_maps
+static int conv2dims[] = {5, 5, 32, 64}; // rows, cols, #input_feature maps, #output_feature_maps
+static int fc1dims[]   = {1024, 128}; // not important for convolution or subsampling layers
+static int fc2dims[]   = {128, 10}; // not important for convolution or subsampling layers
 
 static int loadData(float *x, float *y) {
   // Open the data file
@@ -38,8 +38,8 @@ static int loadData(float *x, float *y) {
       H5Fopen(FLAGS_testdata.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
 
   // Open the dataset x and y (x is input, y is output)
-  const auto x_id = H5Dopen2(file_id, "/x", H5P_DEFAULT);
-  const auto y_id = H5Dopen2(file_id, "/y", H5P_DEFAULT);
+  const auto x_id = H5Dopen2(file_id, "/x", H5P_DEFAULT); // 'x' is the name of the 'dataset' in the testfile
+  const auto y_id = H5Dopen2(file_id, "/y", H5P_DEFAULT); // 'y' is the name of the 'dataset' in the testfile
 
   // Get the dataset x dimensions
   const auto xspace = H5Dget_space(x_id);
@@ -77,7 +77,7 @@ static void loadModel(float *conv1, float *conv2, float *fc1, float *fc2) {
   const auto file_id = H5Fopen(FLAGS_model.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
 
   // Open the dataset
-  const auto conv1_id = H5Dopen2(file_id, "/conv1", H5P_DEFAULT);
+  const auto conv1_id = H5Dopen2(file_id, "/conv1", H5P_DEFAULT); // loaded from the model.hdf5 file
   const auto conv2_id = H5Dopen2(file_id, "/conv2", H5P_DEFAULT);
   const auto fc1_id   = H5Dopen2(file_id, "/fc1", H5P_DEFAULT);
   const auto fc2_id   = H5Dopen2(file_id, "/fc2", H5P_DEFAULT);
@@ -105,16 +105,17 @@ static void loadModel(float *conv1, float *conv2, float *fc1, float *fc2) {
 
 
 // From book chapter Figure 16.4
-//*X in the input tensor
-//*W is the tensor of masks
+// X in the input tensor
+// W is the tensor of masks
 // wdims is either conv1dims or conv2dims
-//*Y is the output after the convolution, ydims is the dimensions of the output tensor
+// Y is the output after the convolution, ydims is the dimensions of the output tensor
 static void conv_forward_valid(const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
                                const int ydims[4]) {
-  const auto filter_h   = wdims[0];
-  const auto filter_w   = wdims[1];
-  const auto in_channel = wdims[2];
+  const int filter_h   = wdims[0];
+  const int filter_w   = wdims[1];
+  const int C = wdims[2];
+  const int M = ydims[3];
   auto getWIdx = [wdims] (int p, int q, int c, int m) {
       return p * wdims[1] * wdims[2] * wdims[3] +
              q * wdims[2] * wdims[3] + c * wdims[3] + m;};
@@ -124,13 +125,17 @@ static void conv_forward_valid(const float *X, const int xdims[4],
   auto getYIdx = [ydims] (int i, int row, int col, int num_feature_map) {
     return ((i * ydims[1] + row) * ydims[2] + col) * ydims[3] + num_feature_map;
   };
-  for (const auto i : range(0, ydims[0])) { //FLAGS_BATCH_SIZE ??
-    for (const auto m : range(0, ydims[3])) { // for each output feature map
-      for (const auto w : range(0, ydims[2])) { // for each output element
-        for (const auto h : range(0, ydims[1])) {   
-          for (const auto p : range(0, filter_h)) { // apply filter
-            for (const auto q : range(0, filter_w)) {
-              for (const auto c : range(0, in_channel)) {  
+  // M output feature maps, C input feature maps
+  // M*C masks
+  // Y_i[:,:,m] = sum (Convolve2D X_i[:,:,c] and W[:,:,c,m])
+  // Y_i[:,:,:] = sum (Convolve3D m copies of X_i[:,:,c] and W[:,:,c,:]) 
+  for (const int i : range(0, ydims[0])) { // number of images
+    for (const int m : range(0, M)) { // for each output feature map
+      for (const int w : range(0, ydims[2])) { // for each output element
+        for (const int h : range(0, ydims[1])) {   
+          for (const int p : range(0, filter_h)) { // apply filter
+            for (const int q : range(0, filter_w)) {
+              for (const int c : range(0, C)) {  // for all input feature maps
                 Y[getYIdx(i,h,w,m)] += X[getXIdx(i, h+p, w+q, c)] * W[getWIdx(p,q,c,m)];
               }
             }
@@ -139,34 +144,6 @@ static void conv_forward_valid(const float *X, const int xdims[4],
       }
     }
   }
-}
-//Y is output, X is input, W is the convolution mask
-//XYZ Dims: Dimensions -- width, height, depth
-//@TODO figure out the translation of indices from sequential code 
-__global__ void easyConv (const float *X, const int xdims[4],
-                               const float *W, const int wdims[4], float *Y,
-                               const int ydims[4]){
- const auto filter_h   = wdims[0];
-  const auto filter_w   = wdims[1];
-  const auto in_channel = wdims[2];
-
-  int n, m, h, w, c, p, q;
-  n = blockIdx.x;
-  m = blockIdx.y;
-  h = blockIdx.z / W_grid + threadIdx.y;
-  w = blockIdx.z % W_grid + threadIdx.x;
-
-  float acc = 0.0;
-  for (p = 0; p < filter_h; p++){ // loop over KxK  filter
-    for (q = 0; q < filter_w; q++){  
-      for (c = 0;  c < in_channel; c++) { // sum over all input channels      
-        
-          //acc = acc + X[n, c, h + p, w + q] * W[m, c, p, q];
-      }
-    }
-  }
-  Y[n, m, h, w] = acc;   
-        
 }
 
 // Recified linear unit 4d
