@@ -186,7 +186,7 @@ void easyConvWrapper(const float *X, const int xdims[4],
   int sizeX = multiplyArr(xdims, 4)*sizeof(float);
   int sizeY = multiplyArr(ydims, 4)*sizeof(float);
   int sizeW = multiplyArr(wdims, 4)*sizeof(float);
-
+  printf("sizeX = %d, sizeY = %d, sizeW = %d\n", sizeX, sizeY, sizeW);
   cudaMalloc(&deviceX, sizeX);
   cudaMalloc(&deviceY, sizeY);
   cudaMalloc(&deviceW, sizeW);
@@ -227,12 +227,11 @@ __global__ void easyConv (const float *X, const int xdims[4],
   auto getYIdx = [ydims] (int i, int row, int col, int num_feature_map) {
     return ((i * ydims[1] + row) * ydims[2] + col) * ydims[3] + num_feature_map;
   };
-
   int n, m, h, w, c, p, q;
   n = blockIdx.x;
   m = blockIdx.y;
-  h = blockIdx.z / W_grid + threadIdx.y;
-  w = blockIdx.z % W_grid + threadIdx.x;
+  h = (blockIdx.z / W_grid) * TILE_SIZE + threadIdx.y;
+  w = (blockIdx.z % W_grid) * TILE_SIZE + threadIdx.x;
 
   float acc = 0.0;
   
@@ -246,7 +245,8 @@ __global__ void easyConv (const float *X, const int xdims[4],
   }
 
   Y[getYIdx(n, h, w, m)] = acc;
-        
+  //printf("n = %d, h = %d, w = %d, m = %d, Y[%d,%d,%d,%d] = %f\n", n,h,w,m,n,h,w,m,Y[n,h,w,m]);
+  
 }
 
 // Recified linear unit 4d
