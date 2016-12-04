@@ -16,7 +16,7 @@
 #define NUM_COLS 28
 #define NUM_CHANNELS 1
 #define NUM_DIGITS 10
-#define TILE_SIZE 6
+#define TILE_SIZE 16
 
 static int FLAGS_batch_size = 10000; // number of images....actual value changes at runtime
 static std::string FLAGS_testdata{};
@@ -31,6 +31,11 @@ static int conv1dims[] = {5, 5, 1, 32}; // rows, cols, #input_feature maps, #out
 static int conv2dims[] = {5, 5, 32, 64}; // rows, cols, #input_feature maps, #output_feature_maps
 static int fc1dims[]   = {1024, 128}; // not important for convolution or subsampling layers
 static int fc2dims[]   = {128, 10}; // not important for convolution or subsampling layers
+
+void easyConvWrapper (const float *X, const int xdims[4], const float *W, const int wdims[4], float *Y, const int ydims[4]);
+__global__ void easyConv (const float *X, const int xdims[4],
+                               const float *W, const int wdims[4], float *Y,
+                               const int ydims[4], int W_grid);
 
 static int loadData(float *x, float *y) {
   // Open the data file
@@ -111,7 +116,8 @@ static void loadModel(float *conv1, float *conv2, float *fc1, float *fc2) {
 // Y is the output after the convolution, ydims is the dimensions of the output tensor
 static void conv_forward_valid(const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
-                               const int ydims[4]) {
+                               const int ydims[4]) 
+{
   const int filter_h   = wdims[0];
   const int filter_w   = wdims[1];
   const int C = wdims[2];
@@ -146,14 +152,54 @@ static void conv_forward_valid(const float *X, const int xdims[4],
   }
 }
 
+int multiplyArr(int* arr, int n) {
+  int prod = 1;
+  
+  for (int i = 0; i < n; i++) {
+    prod *= arr[i];
+  }
+  return prod;
+}
+
+void easyConvWrapper(const float *X, const int xdims[4],
+                     const float *W, const int wdims[4], float *Y,
+                     const int ydims[4]) {
+  const int W_out = ydims[2];
+  const int H_out = ydims[1];
+  const int W_grid = ceil(float(W_out)/float(TILE_SIZE)); // number of horizontal tiles per output map
+  const int H_grid = ceil(float(H_out)/float(TILE_SIZE));
+  const int M = ydims[3];
+  const int N = ydims[0];
+  // number of vertical tiles per output map
+  const int Z = H_grid * W_grid;
+  const dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
+  const dim3 gridDim(N, M, Z);
+  float* deviceX;
+  float* deviceY;
+  float* deviceW;
+  float* deviceXDims;
+  float* deviceYDims;
+  float* deviceWDims;
+  easyConv<<<gridDim, blockDim>>>(X, xdims, W, wdims, Y, ydims, W_grid);
+}
 //Y is output, X is input, W is the convolution mask
 //XYZ Dims: Dimensions -- width, height, depth
 __global__ void easyConv (const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
-                               const int ydims[4]){
- /*const auto filter_h   = wdims[0];
-  const auto filter_w   = wdims[1];
-  const auto in_channel = wdims[2];
+                               const int ydims[4], int W_grid){
+  const auto filter_h  = wdims[0];
+  const auto filter_w = wdims[1];
+  const auto C = wdims[2];
+  
+  auto getWIdx = [wdims] (int p, int q, int c, int m) {
+      return p * wdims[1] * wdims[2] * wdims[3] +
+             q * wdims[2] * wdims[3] + c * wdims[3] + m;};
+  auto getXIdx = [xdims] (int i, int y, int x, int z) {
+      return i * xdims[1] * xdims[2] * xdims[3] + y * xdims[2] * xdims[3] + x * xdims[3] + z;
+  };
+  auto getYIdx = [ydims] (int i, int row, int col, int num_feature_map) {
+    return ((i * ydims[1] + row) * ydims[2] + col) * ydims[3] + num_feature_map;
+  };
 
   int n, m, h, w, c, p, q;
   n = blockIdx.x;
@@ -162,15 +208,17 @@ __global__ void easyConv (const float *X, const int xdims[4],
   w = blockIdx.z % W_grid + threadIdx.x;
 
   float acc = 0.0;
+  
   for (p = 0; p < filter_h; p++){ // loop over KxK  filter
     for (q = 0; q < filter_w; q++){  
-      for (c = 0;  c < in_channel; c++) { // sum over all input channels      
-        
-          //acc = acc + X[n, c, h + p, w + q] * W[m, c, p, q];
+      for (c = 0;  c < C; c++) { // sum over all input feature maps      
+          if (h+p < xdims[1] && w+q < xdims[2]) 
+          acc = acc + X[getXIdx(n, h + p, w + q, c)] * W[getWIdx(p, q, c, m)];
       }
     }
   }
-  Y[n, m, h, w] = acc;   */
+
+  Y[getYIdx(n, h, w, m)] = acc;
         
 }
 
@@ -248,7 +296,8 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   const int adims[] = {xdims[0], (xdims[1] - conv1dims[0] + 1),
                        (xdims[2] - conv1dims[1] + 1), conv1dims[3]};
   auto a = zeros<float>(adims);
-  conv_forward_valid(x, xdims, conv1, conv1dims, a, adims);
+  easyConvWrapper(x, xdims, conv1, conv1dims, a, adims);
+  //conv_forward_valid(x, xdims, conv1, conv1dims, a, adims);
 
   /// relu layer
   relu4(a, adims);
@@ -264,8 +313,8 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   const int cdims[] = {bdims[0], (bdims[1] - conv2dims[0] + 1),
                        (bdims[2] - conv2dims[1] + 1), conv2dims[3]};
   auto c = zeros<float>(cdims);
-  conv_forward_valid(b, bdims, conv2, conv2dims, c, cdims);
-
+  //conv_forward_valid(b, bdims, conv2, conv2dims, c, cdims);
+  easyConvWrapper(b, bdims, conv2, conv2dims, c, cdims);
   // relu
   relu4(c, cdims);
 
@@ -300,6 +349,8 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   delete[] e;
   delete[] f;
 }
+
+
 
 int main(int argc, char **argv) {
 
