@@ -18,6 +18,16 @@
 #define NUM_DIGITS 10
 #define TILE_SIZE 16
 
+#define wbCheck(stmt)                                                     \
+  do {                                                                    \
+    cudaError_t err = stmt;                                               \
+    if (err != cudaSuccess) {                                             \
+      printf("Failed to run stmt %s\n", #stmt);                         \
+      printf("ERROR - Got CUDA error ...  %s\n", cudaGetErrorString(err));      \
+      return ;                                                            \
+    }                                                                     \
+  } while (0)
+
 static int FLAGS_batch_size = 10000; // number of images....actual value changes at runtime
 static std::string FLAGS_testdata{};
 static std::string FLAGS_model{};
@@ -167,11 +177,13 @@ void easyConvWrapper(const float *X, const int xdims[4],
   const int W_out = ydims[2];
   const int H_out = ydims[1];
   const int W_grid = ceil(float(W_out)/float(TILE_SIZE)); // number of horizontal tiles per output map
-  const int H_grid = ceil(float(H_out)/float(TILE_SIZE));
-  const int M = ydims[3];
-  const int N = ydims[0];
-  // number of vertical tiles per output map
-  const int Z = H_grid * W_grid;
+  const int H_grid = ceil(float(H_out)/float(TILE_SIZE)); // number of vertical tiles per output map
+
+  const int N = ydims[0]; //num images
+  const int M = wdims[3]; //num output feature_maps
+
+  const int Z = H_grid * W_grid; // total number of tiles
+  
   const dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
   const dim3 gridDim(N, M, Z);
   
@@ -187,26 +199,29 @@ void easyConvWrapper(const float *X, const int xdims[4],
   int sizeY = multiplyArr(ydims, 4)*sizeof(float);
   int sizeW = multiplyArr(wdims, 4)*sizeof(float);
   printf("sizeX = %d, sizeY = %d, sizeW = %d\n", sizeX, sizeY, sizeW);
-  cudaMalloc(&deviceX, sizeX);
-  cudaMalloc(&deviceY, sizeY);
-  cudaMalloc(&deviceW, sizeW);
-  cudaMalloc(&deviceXDims, 4 * sizeof(int));
-  cudaMalloc(&deviceYDims, 4 * sizeof(int));
-  cudaMalloc(&deviceWDims, 4 * sizeof(int));
-  cudaMalloc(&deviceW_Grid, sizeof(int));
+  wbCheck(cudaMalloc(&deviceX, sizeX));
+  wbCheck(cudaMalloc(&deviceY, sizeY));
+  wbCheck(cudaMalloc(&deviceW, sizeW));
+  wbCheck(cudaMalloc(&deviceXDims, 4 * sizeof(int)));
+  wbCheck(cudaMalloc(&deviceYDims, 4 * sizeof(int)));
+  wbCheck(cudaMalloc(&deviceWDims, 4 * sizeof(int)));
+  wbCheck(cudaMalloc(&deviceW_Grid, sizeof(int)));
   
-  cudaMemcpy(deviceX, X, sizeX, cudaMemcpyHostToDevice);
-  cudaMemcpy(deviceY, Y, sizeY, cudaMemcpyHostToDevice);
-  cudaMemcpy(deviceW, W, sizeW, cudaMemcpyHostToDevice);
-  cudaMemcpy(deviceXDims, xdims, 4 * sizeof(int), cudaMemcpyHostToDevice);
-  cudaMemcpy(deviceYDims, ydims, 4 * sizeof(int), cudaMemcpyHostToDevice);
-  cudaMemcpy(deviceWDims, wdims, 4 * sizeof(int), cudaMemcpyHostToDevice);
-  cudaMemcpy(deviceW_Grid, &W_grid, sizeof(int), cudaMemcpyHostToDevice);
+  wbCheck(cudaMemcpy(deviceX, X, sizeX, cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceY, Y, sizeY, cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceW, W, sizeW, cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceXDims, xdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceYDims, ydims, 4 * sizeof(int), cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceWDims, wdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceW_Grid, &W_grid, sizeof(int), cudaMemcpyHostToDevice));
   
   easyConv<<<gridDim, blockDim>>>(deviceX, deviceXDims, deviceW, deviceWDims, deviceY, deviceYDims, deviceW_Grid);
 
-  cudaMemcpy(Y, deviceY, sizeY, cudaMemcpyDeviceToHost);
-
+  wbCheck(cudaMemcpy(Y, deviceY, sizeY, cudaMemcpyDeviceToHost));
+  // for(int i = 0; i < multiplyArr(ydims,4); i++) {
+  //   if (Y[i] > 0)
+  //   printf("Y[%d] = %f\n", i,Y[i]);
+  // }
   //Free CUDA Memory
 }
 //Y is output, X is input, W is the convolution mask
@@ -214,10 +229,10 @@ void easyConvWrapper(const float *X, const int xdims[4],
 __global__ void easyConv (const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
                                const int ydims[4], int* W_grid1){
-  const auto filter_h  = wdims[0];
-  const auto filter_w = wdims[1];
-  const auto C = wdims[2];
-  int W_grid = *W_grid1;
+  const int filter_h  = wdims[0];
+  const int filter_w = wdims[1];
+  const int C = wdims[2]; //num input feature_maps
+  int W_grid = *W_grid1; // num tiles in horizontal direction
   auto getWIdx = [wdims] (int p, int q, int c, int m) {
       return p * wdims[1] * wdims[2] * wdims[3] +
              q * wdims[2] * wdims[3] + c * wdims[3] + m;};
@@ -232,20 +247,21 @@ __global__ void easyConv (const float *X, const int xdims[4],
   m = blockIdx.y;
   h = (blockIdx.z / W_grid) * TILE_SIZE + threadIdx.y;
   w = (blockIdx.z % W_grid) * TILE_SIZE + threadIdx.x;
-
-  float acc = 0.0;
-  
-  for (p = 0; p < filter_h; p++){ // loop over KxK  filter
-    for (q = 0; q < filter_w; q++){  
-      for (c = 0;  c < C; c++) { // sum over all input feature maps      
-          if (h+p < xdims[1] && w+q < xdims[2]) 
-          acc = acc + X[getXIdx(n, h + p, w + q, c)] * W[getWIdx(p, q, c, m)];
+  float acc = 0.0f;
+  if (h < ydims[1] && w < ydims[2]) {
+    for (p = 0; p < filter_h; p++){ // loop over KxK  filter
+      for (q = 0; q < filter_w; q++){  
+        for (c = 0;  c < C; c++) { // sum over all input feature maps      
+            if (h+p < xdims[1] && w+q < xdims[2]) {
+              acc += (X[getXIdx(n, h + p, w + q, c)] * W[getWIdx(p, q, c, m)]);
+              //printf("X[%d,%d,%d,%d] = %f, W[%d,%d,%d,%d] = %f\n", n,h+p,w+q,c, X[getXIdx(n, h + p, w + q, c)], p,q,c,m, W[getWIdx(p, q, c, m)]);
+            } 
+        }
       }
     }
+    Y[getYIdx(n, h, w, m)] = acc;
   }
-
-  Y[getYIdx(n, h, w, m)] = acc;
-  //printf("n = %d, h = %d, w = %d, m = %d, Y[%d,%d,%d,%d] = %f\n", n,h,w,m,n,h,w,m,Y[n,h,w,m]);
+  //printf("n = %d, h = %d, w = %d, m = %d, Y[%d,%d,%d,%d] = %f\n", n,h,w,m,n,h,w,m,Y[getYIdx(n, h, w, m)]);
   
 }
 
@@ -265,7 +281,8 @@ static void relu2(float *X, const int xdims[2]) {
 
 // From book chapter Figure 16.5
 static void average_pool(const float *X, const int xdims[4],
-                         const int pool_size, float *Y, const int ydims[4]) {
+                         const int pool_size, float *Y, const int ydims[4]) 
+{
   for (const auto i : range(0, ydims[0])) {
     for (const auto m : range(0, ydims[3])) {
       for (const auto w : range(0, ydims[2])) {
@@ -287,7 +304,8 @@ static void average_pool(const float *X, const int xdims[4],
 }
 
 static void fully_forward(const float *X, const int xdims[2], float *W,
-                          const int wdims[2], float *Y, const int ydims[2]) {
+                          const int wdims[2], float *Y, const int ydims[2]) 
+{
   for (const auto i : range(0, xdims[0])) {
     for (const auto j : range(0, wdims[1])) {
       float sum = 0;
@@ -300,7 +318,8 @@ static void fully_forward(const float *X, const int xdims[2], float *W,
 }
 
 // Choose the guess with largest score
-static void argmax(const float *X, const int xdims[2], int *Y) {
+static void argmax(const float *X, const int xdims[2], int *Y) 
+{
   for (const auto i : range(0, xdims[0])) {
     auto max_idx = 0;
     auto max     = X[i * xdims[1]];
@@ -325,7 +344,7 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   auto a = zeros<float>(adims);
   easyConvWrapper(x, xdims, conv1, conv1dims, a, adims);
   //conv_forward_valid(x, xdims, conv1, conv1dims, a, adims);
-
+  
   /// relu layer
   relu4(a, adims);
 
@@ -340,8 +359,8 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   const int cdims[] = {bdims[0], (bdims[1] - conv2dims[0] + 1),
                        (bdims[2] - conv2dims[1] + 1), conv2dims[3]};
   auto c = zeros<float>(cdims);
-  //conv_forward_valid(b, bdims, conv2, conv2dims, c, cdims);
   easyConvWrapper(b, bdims, conv2, conv2dims, c, cdims);
+  //conv_forward_valid(b, bdims, conv2, conv2dims, c, cdims);
   // relu
   relu4(c, cdims);
 
