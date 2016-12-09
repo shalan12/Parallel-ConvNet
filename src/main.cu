@@ -347,7 +347,8 @@ static void argmax(const float *X, const int xdims[2], int *Y)
 // threadIdx.x corresponds to m, threadIdx.y and threadIdx.z correspond col,row respectively 
 // so each therad computes 2 partial convolutions
     // within a thread block c is the same.. so a thread block uses a patch of TILE_SIZE*2 of X_{i,c} and computes 
-    // blockDim.x convolutions with different masks  
+    // blockDim.x convolutions with different masks
+    // a block reuses each element in a tile TILE_SIZE * TILE_SIZE * blockDim.x times
 // we send all the convolutions to the kernel for one image
 // as the result from an image comes back we sum the results on the CPU
 __global__ void convolveWrapper(const float *X, const int xdims[4],
@@ -387,11 +388,15 @@ __global__ void convolveWrapper(const float *X, const int xdims[4],
   wbCheck(cudaMemcpy(deviceXDims, xdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
   wbCheck(cudaMemcpy(deviceYDims, ydims, 4 * sizeof(int), cudaMemcpyHostToDevice));
   wbCheck(cudaMemcpy(deviceWDims, wdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
-  wbCheck(cudaMemcpy(deviceW_Grid, &W_grid, sizeof(int), cudaMemcpyHostToDevice));
   
   dim3 gridDim(M/MperBlock,C,Z); // ASSUMES - that M is a multiple of 16
   dim3 blockDim(MperBlock,TILE_SIZE,TILE_SIZE);
-
+  auto getYIdx = [ydims] (int i, int row, int col, int num_feature_map) {
+    return ((i * ydims[1] + row) * ydims[2] + col) * ydims[3] + num_feature_map;
+  };
+  auto getYtempIdx = [ydims] (int row, int col, int c, int m) {
+    return row * (ydims[2] * C * M) + col * (C * M) + c * M + m;
+  }
   
   int sum;
   // may use 2 streams here..and memcpyAsync send the odd numbered kernel calls and the memcpy on the the first stream
@@ -399,7 +404,7 @@ __global__ void convolveWrapper(const float *X, const int xdims[4],
   // so that while we're copying the result of one kernel call, the second can be scheduled
   // right now we'd be waiting till then
   for (int i = 0; i < num_images; i++) {
-    convolve<<<gridDim, blockDim>>>(deviceX, deviceXdims, deviceW, deviceWdims, deviceY, deviceYdims,W_grid,imageNum);
+    convolve<<<gridDim, blockDim>>>(deviceX, deviceXdims, deviceW, deviceWdims, deviceY, deviceYdims, W_grid, imageNum);
     cudaMemcpy(Ytemp, deviceY, sizeYperImage, cudaMemcpyDeviceToHost);
     // Sum across C
     for (int m = 0; m < M; m++) {  
@@ -407,9 +412,9 @@ __global__ void convolveWrapper(const float *X, const int xdims[4],
         for (int col = 0; col < ydims[2]; col++) {
           sum = 0;
           for (int c = 0; j < C; j++) {
-            sum += Ytemp[row,col,c,m];
+            sum += Ytemp[getYtempIdx(row,col,c,m)];
           }
-          Y[i,row,col,m] = sum;
+          Y[getYIdx(i,row,col,m)] = sum;
         }
       }
     }
@@ -419,11 +424,36 @@ __global__ void convolveWrapper(const float *X, const int xdims[4],
 }
 
 
-
-__global__ void covolve(const float *X, const int xdims[4],
+//change so each thread computes two convolutions
+__global__ void convolve(const float *X, const int xdims[4],
                         const float *W, const int wdims[4], float *Y,
-                        const int ydims[4], int W_grid, int imageNum) {
+                        const int ydims[4], int W_grid, int n) {
   
+  const int filter_h  = wdims[0];
+  const int filter_w  = wdims[1];
+  int tx, ty;
+  tx = threadIdx.x;
+  ty = threadIdx.y;
+  int m = blockIdx.z * blockDim.z + threadIdx.z;
+  int h = (Z / W_grid) * TILE_SIZE + ty;
+  int w = (Z % W_grid) * TILE_SIZE + tx;
+  int c = blockIdx.y; // each thread does a convolution of X[n, h:h+5, w:w+5,m] with W[:, :, c, m]
+  const int input_TILE_SIZE = TILE_SIZE + 4; // ASSUMES :  filter_h = filter_w = 5
+  __shared__ float[input_TILE_SIZE][input_TILE_SIZE] sharedX;
+  if (threadIdx.z == 0) {
+    if (h < xdims[1] && w < xdims[2]) sharedX[ty][tx] = X[n,h,w,m];
+    if (ty < 4 && tx < 4) sharedX[ty + blockDim.y][tx + blockDim.x] = X[n, h+blockDim.y, w+blockDim.x, m];
+  }
+  
+  float sum = 0.0f;
+
+  for (int p = 0; p < filter_h; p++) {
+    for (int q = 0; q < filter_w; q++) {
+      sum += sharedX[ty + p][tx + q] * W[p,q,c,m];
+    }
+  }
+  Y[i,ty,tx,c,m] = sum;
+
 }
 
 // Forward operation for the CNN, a combination of conv layer + average pooling
