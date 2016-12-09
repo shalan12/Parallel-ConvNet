@@ -284,11 +284,15 @@ void tiledConvWrapper(const float *X, const int xdims[4],
   tiledConv<<<gridDim, blockDim, sharedMemSize>>>(deviceX, deviceXDims, deviceW, deviceWDims, deviceY, deviceYDims, deviceW_Grid);
 
   wbCheck(cudaMemcpy(Y, deviceY, sizeY, cudaMemcpyDeviceToHost));
-  // for(int i = 0; i < multiplyArr(ydims,4); i++) {
-  //   if (Y[i] > 0)
-  //   printf("Y[%d] = %f\n", i,Y[i]);
-  // }
+
   //Free CUDA Memory
+  wbCheck(cudaFree(deviceX));
+  wbCheck(cudaFree(deviceY));
+  wbCheck(cudaFree(deviceW));
+  wbCheck(cudaFree(deviceXDims));
+  wbCheck(cudaFree(deviceYDims));
+  wbCheck(cudaFree(deviceWDims));
+  wbCheck(cudaFree(deviceW_Grid));
 }
 
 //Y is output, X is input, W is the convolution mask
@@ -321,14 +325,12 @@ __global__ void easyConv (const float *X, const int xdims[4],
         for (c = 0;  c < C; c++) { // sum over all input feature maps      
             if (h+p < xdims[1] && w+q < xdims[2]) {
               acc += (X[getXIdx(n, h + p, w + q, c)] * W[getWIdx(p, q, c, m)]);
-              //printf("X[%d,%d,%d,%d] = %f, W[%d,%d,%d,%d] = %f\n", n,h+p,w+q,c, X[getXIdx(n, h + p, w + q, c)], p,q,c,m, W[getWIdx(p, q, c, m)]);
             } 
         }
       }
     }
     Y[getYIdx(n, h, w, m)] = acc;
   }
-  //printf("n = %d, h = %d, w = %d, m = %d, Y[%d,%d,%d,%d] = %f\n", n,h,w,m,n,h,w,m,Y[getYIdx(n, h, w, m)]);
   
 }
 
@@ -336,13 +338,16 @@ __global__ void tiledConv (const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
                                const int ydims[4], int* W_grid1){
   //Variables to ease array access. and set various dimensions
-  const int filter_h  = wdims[0];
-  const int filter_w = wdims[1];
+  const int filter_h  = wdims[FILTER_HEIGHT_IDX];
+  const int filter_w = wdims[FILTER_WIDTH_IDX];
   const int C = wdims[2]; //num input feature_maps
   int W_grid = *W_grid1; // num tiles in horizontal direction
   const int xTileSize = TILE_SIZE + wdims[FILTER_HEIGHT_IDX] -1;
+  const int xHeight = xdims[1];
+  const int xWidth = xdims[2];
   
-  //Annonymous functions to make accessing arrays easier (and hopefully less buggy) 
+
+  //Anonymous functions to make accessing arrays easier (and hopefully less buggy) 
   auto getWIdx = [wdims] (int p, int q, int c, int m) {
       return p * wdims[1] * wdims[2] * wdims[3] +
              q * wdims[2] * wdims[3] + c * wdims[3] + m;};
@@ -356,7 +361,7 @@ __global__ void tiledConv (const float *X, const int xdims[4],
   //Declaring shared memory, and setting up pointers to the start of X and the start of W
   extern __shared__ float sharedMemory[];
   float* xShared = &sharedMemory[0];
-  float* wShared = &sharedMemory[TILE_SIZE*TILE_SIZE];
+  float* wShared = &sharedMemory[xTileSize*xTileSize];
 
   //Variables to keep track of position
   int n, m, h, w, c, p, q, h0, w0, h_base, w_base;
@@ -369,33 +374,39 @@ __global__ void tiledConv (const float *X, const int xdims[4],
   h = h_base + h0;
   w = w_base + w0;
 
+
   //Looping through all the input channels
-  float acc = 0.0f;
-  for(c = 0; c < C; c++){
-    //Loading the filter into shared memory
-    if(w0 < wdims[FILTER_WIDTH_IDX] && h0 < wdims[FILTER_HEIGHT_IDX]){
-      wShared[(h0*filter_w) + w0 ] = W[getWIdx(h0, w0, c, m)]; //@TODO: Check this to make sure that it's correct
-      //printf("New line 377\n");
-    } 
-    __syncthreads();
+  if(h < ydims[1] && w < ydims[2]){
+    float acc = 0.0f;
+    for(c = 0; c < C; c++){
 
-    //Loading X into shared memory
-    for(int i = h; i < h_base + xTileSize; i+=TILE_SIZE){
-      for(int j = w; j < w_base + xTileSize; j+= TILE_SIZE){
-        xShared[(i-h_base) * xTileSize + (j-w_base)] = X[getXIdx(n, h, w, c)]; //@TODO: Definitely check this one
-      }
-    }
-    __syncthreads();
+      //Loading the filter into shared memory
+      if(w0 < filter_w && h0 < filter_h){
+        wShared[(h0*filter_w) + w0 ] = W[getWIdx(h0, w0, c, m)]; //@TODO: Check this to make sure that it's correct
+      } 
+      __syncthreads();
 
-    //Performing the convolution
-    for(p = 0; p < filter_h; p++){
-      for(q = 0; q < filter_w; q++){
-        acc += xShared[(h+q)*xTileSize + (w+q)] * wShared[p*filter_w + q];
+      //Loading X into shared memory
+      for(int i = h; i < h_base + xTileSize; i+=TILE_SIZE){
+        for(int j = w; j < w_base + xTileSize; j+= TILE_SIZE){
+          //if((i - h_base < xTileSize) && (j-w_base < xTileSize))
+          xShared[(i-h_base) * xTileSize + (j-w_base)] = X[getXIdx(n, h, w, c)]; //@TODO: Definitely check this one
+        }
       }
+      __syncthreads();
+
+      //Performing the convolution
+      for(p = 0; p < filter_h; p++){
+        for(q = 0; q < filter_w; q++){
+          //check for out of bounds
+          if((h0+p < xTileSize) && (w0 + q < xTileSize))
+            acc += xShared[(h0+p)*xTileSize + (w0+q)] * wShared[(p*filter_w) + q];
+        }
+      }
+      __syncthreads();
     }
-    __syncthreads();
+    Y[getYIdx(n, h, w, m)] = acc;
   }
-  Y[getYIdx(n, h, w, m)] = acc;
   
   /*if (h < ydims[1] && w < ydims[2]) {
     for (p = 0; p < filter_h; p++){ // loop over KxK  filter
@@ -490,6 +501,7 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   const int adims[] = {xdims[0], (xdims[1] - conv1dims[0] + 1),
                        (xdims[2] - conv1dims[1] + 1), conv1dims[3]};
   auto a = zeros<float>(adims);
+  printf("Starting First Convolution\n");
   tiledConvWrapper(x, xdims, conv1, conv1dims, a, adims);
   //conv_forward_valid(x, xdims, conv1, conv1dims, a, adims);
   
