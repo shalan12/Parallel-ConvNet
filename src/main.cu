@@ -42,6 +42,8 @@ static int conv2dims[] = {5, 5, 32, 64}; // rows, cols, #input_feature maps, #ou
 static int fc1dims[]   = {1024, 128}; // not important for convolution or subsampling layers
 static int fc2dims[]   = {128, 10}; // not important for convolution or subsampling layers
 
+__global__ void convolve3Dwrapper(const float *X, const int xdims[4], const float *W, const int wdims[4], float *Y,
+                                  const int ydims[4], bool useConstMemory=false);
 void easyConvWrapper (const float *X, const int xdims[4], const float *W, const int wdims[4], float *Y, const int ydims[4]);
 __global__ void easyConv (const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
@@ -334,6 +336,24 @@ static void argmax(const float *X, const int xdims[2], int *Y)
   }
 }
 
+
+// Y_i[:,:,m] = sum (Convolve2D X_i[:,:,c] and W[:,:,c,m])
+// Y_i[:,:,:] = sum (Convolve3D m copies of X_i[:,:,c] and W[:,:,c,:]) 
+__global__ void convolve3Dwrapper(const float *X, const int xdims[4],
+                               const float *W, const int wdims[4], float *Y,
+                               const int ydims[4], bool useConstMemory=false) {
+
+
+}
+
+
+
+__global__ void covolve3d(const float *X, const int xdims[4],
+                               const float *W, const int wdims[4], float *Y,
+                               const int ydims[4], int* W_grid1) {
+  
+}
+
 // Forward operation for the CNN, a combination of conv layer + average pooling
 // + relu
 void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
@@ -342,7 +362,8 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   const int adims[] = {xdims[0], (xdims[1] - conv1dims[0] + 1),
                        (xdims[2] - conv1dims[1] + 1), conv1dims[3]};
   auto a = zeros<float>(adims);
-  easyConvWrapper(x, xdims, conv1, conv1dims, a, adims);
+  convolve3Dwrapper(x, xdims, conv1, conv1dims, a, adims);
+  //easyConvWrapper(x, xdims, conv1, conv1dims, a, adims);
   //conv_forward_valid(x, xdims, conv1, conv1dims, a, adims);
   
   /// relu layer
@@ -359,7 +380,8 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   const int cdims[] = {bdims[0], (bdims[1] - conv2dims[0] + 1),
                        (bdims[2] - conv2dims[1] + 1), conv2dims[3]};
   auto c = zeros<float>(cdims);
-  easyConvWrapper(b, bdims, conv2, conv2dims, c, cdims);
+  convolve3Dwrapper(b, bdims, conv2, conv2dims, c, cdims);
+  //easyConvWrapper(b, bdims, conv2, conv2dims, c, cdims);
   //conv_forward_valid(b, bdims, conv2, conv2dims, c, cdims);
   // relu
   relu4(c, cdims);
