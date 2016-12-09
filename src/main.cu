@@ -389,8 +389,8 @@ __global__ void tiledConv (const float *X, const int xdims[4],
       //Loading X into shared memory
       for(int i = h; i < h_base + xTileSize; i+=TILE_SIZE){
         for(int j = w; j < w_base + xTileSize; j+= TILE_SIZE){
-          //if((i - h_base < xTileSize) && (j-w_base < xTileSize))
-          xShared[(i-h_base) * xTileSize + (j-w_base)] = X[getXIdx(n, h, w, c)]; //@TODO: Definitely check this one
+          if((i - h_base < xTileSize) && (j-w_base < xTileSize))
+            xShared[(i-h_base) * xTileSize + (j-w_base)] = X[getXIdx(n, i, j, c)]; //@TODO: Definitely check this one
         }
       }
       __syncthreads();
