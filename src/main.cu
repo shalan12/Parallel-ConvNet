@@ -16,7 +16,8 @@
 #define NUM_COLS 28
 #define NUM_CHANNELS 1
 #define NUM_DIGITS 10
-#define TILE_SIZE 16
+#define TILE_SIZE 8
+#define MperBlock = 16
 
 #define wbCheck(stmt)                                                     \
   do {                                                                    \
@@ -175,7 +176,8 @@ int multiplyArr(const int* arr, int n) {
 
 void easyConvWrapper(const float *X, const int xdims[4],
                      const float *W, const int wdims[4], float *Y,
-                     const int ydims[4]) {
+                     const int ydims[4]) 
+{
   const int W_out = ydims[2];
   const int H_out = ydims[1];
   const int W_grid = ceil(float(W_out)/float(TILE_SIZE)); // number of horizontal tiles per output map
@@ -230,7 +232,8 @@ void easyConvWrapper(const float *X, const int xdims[4],
 //XYZ Dims: Dimensions -- width, height, depth
 __global__ void easyConv (const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
-                               const int ydims[4], int* W_grid1){
+                               const int ydims[4], int* W_grid1)
+{
   const int filter_h  = wdims[0];
   const int filter_w = wdims[1];
   const int C = wdims[2]; //num input feature_maps
@@ -338,19 +341,88 @@ static void argmax(const float *X, const int xdims[2], int *Y)
 
 
 // Y_i[:,:,m] = sum (Convolve2D X_i[:,:,c] and W[:,:,c,m])
-// Y_i[:,:,:] = sum (Convolve3D m copies of X_i[:,:,c] and W[:,:,c,:]) 
-__global__ void convolve3Dwrapper(const float *X, const int xdims[4],
+// blockIdx.x corresponds to m
+// blockIdx.y corresponds to input_feature_map
+// blockIdx.z corresponds to tiles
+// threadIdx.x corresponds to m, threadIdx.y and threadIdx.z correspond col,row respectively 
+// so each therad computes 2 partial convolutions
+    // within a thread block c is the same.. so a thread block uses a patch of TILE_SIZE*2 of X_{i,c} and computes 
+    // blockDim.x convolutions with different masks  
+// we send all the convolutions to the kernel for one image
+// as the result from an image comes back we sum the results on the CPU
+__global__ void convolveWrapper(const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
                                const int ydims[4], bool useConstMemory=false) {
+  const int num_images = xdims[0];
+  const int C = wdims[2];
+  const int M = wdims[3]; //num output feature_maps
+  const int Z = H_grid * W_grid; // total number of tiles  
+  //const int batch_size = 1000; // going to do this many kernel calls at once
+  const int W_out = ydims[2];
+  const int H_out = ydims[1];
+  const int W_grid = ceil(float(W_out)/float(TILE_SIZE)); // number of horizontal tiles per output map
+  const int H_grid = ceil(float(H_out)/float(TILE_SIZE)); // number of vertical tiles per output map
 
+  int sizeX = multiplyArr(xdims, 4) * sizeof(float);
+  int sizeY = multiplyArr(ydims, 4) * C * sizeof(float); // for each output_feature map element, all the c different values
+                                                               // are stored in different locations, and the CPU will sum them
+                                                              // we'll store them like Y[i,y,x,c,m] in device, and Y[y,x,c,m] in a temp arr on host
+  int sizeW = multiplyArr(wdims, 4) * sizeof(float);
+  
+  // allocate memory
+  int sizeYperImage = sizeY/ydims[0]; // we know sizeY is a multiple of ydims[0]
+  float* Ytemp = (float*) malloc(sizeYperImage); 
+  wbCheck(cudaMalloc(&deviceX, sizeX));
+  wbCheck(cudaMalloc(&deviceW, sizeW));
+  wbCheck(cudaMalloc(&deviceXDims, 4 * sizeof(int)));
+  wbCheck(cudaMalloc(&deviceYDims, 4 * sizeof(int)));
+  wbCheck(cudaMalloc(&deviceWDims, 4 * sizeof(int)));
+  wbCheck(cudaMalloc(&deviceW_Grid, sizeof(int)));
 
+  wbCheck(cudaMalloc(&deviceY, sizeY));
+
+  // copy memory
+  wbCheck(cudaMemcpy(deviceX, X, sizeX, cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceW, W, sizeW, cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceXDims, xdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceYDims, ydims, 4 * sizeof(int), cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceWDims, wdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceW_Grid, &W_grid, sizeof(int), cudaMemcpyHostToDevice));
+  
+  dim3 gridDim(M/MperBlock,C,Z); // ASSUMES - that M is a multiple of 16
+  dim3 blockDim(MperBlock,TILE_SIZE,TILE_SIZE);
+
+  
+  int sum;
+  // may use 2 streams here..and memcpyAsync send the odd numbered kernel calls and the memcpy on the the first stream
+  // even numbered kernel calls and memcpy to second stream
+  // so that while we're copying the result of one kernel call, the second can be scheduled
+  // right now we'd be waiting till then
+  for (int i = 0; i < num_images; i++) {
+    convolve<<<gridDim, blockDim>>>(deviceX, deviceXdims, deviceW, deviceWdims, deviceY, deviceYdims,W_grid,imageNum);
+    cudaMemcpy(Ytemp, deviceY, sizeYperImage, cudaMemcpyDeviceToHost);
+    // Sum across C
+    for (int m = 0; m < M; m++) {  
+      for (int row = 0; row < ydims[1]; row++) {
+        for (int col = 0; col < ydims[2]; col++) {
+          sum = 0;
+          for (int c = 0; j < C; j++) {
+            sum += Ytemp[row,col,c,m];
+          }
+          Y[i,row,col,m] = sum;
+        }
+      }
+    }
+    deviceY += sizeYperImage;
+  }
+  
 }
 
 
 
-__global__ void covolve3d(const float *X, const int xdims[4],
-                               const float *W, const int wdims[4], float *Y,
-                               const int ydims[4], int* W_grid1) {
+__global__ void covolve(const float *X, const int xdims[4],
+                        const float *W, const int wdims[4], float *Y,
+                        const int ydims[4], int W_grid, int imageNum) {
   
 }
 
