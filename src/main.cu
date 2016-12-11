@@ -387,7 +387,9 @@ void convolveWrapper(const float *X, const int xdims[4],
   int* deviceWDims; 
 
   // allocate memory
-  int sizeYperImage = sizeY/ydims[0]; // we know sizeY is a multiple of ydims[0]
+  int elementsYPerImage = ydims[1] * ydims[2] * xdims[3] * ydims[3];
+  int sizeYperImage = elementsYPerImage * sizeof(float);
+  
   float* Ytemp = (float*) malloc(sizeYperImage); 
   wbCheck(cudaMalloc(&deviceX, sizeX));
   wbCheck(cudaMalloc(&deviceW, sizeW));
@@ -426,17 +428,17 @@ void convolveWrapper(const float *X, const int xdims[4],
 
   for (int i = 0; i < num_images; i++) {
     convolve<<<gridDim, blockDim>>>(deviceX, deviceXDims, deviceW, deviceWDims, deviceY, deviceYDims, W_grid, i);
-    cudaMemcpy(Ytemp, deviceY + i * sizeYperImage, sizeYperImage, cudaMemcpyDeviceToHost);
+    cudaMemcpy(Ytemp, &(deviceY[i*elementsYPerImage]), sizeYperImage, cudaMemcpyDeviceToHost);
     // Sum across C
-    for (int m = 0; m < M; m++) {  
-      for (int row = 0; row < ydims[1]; row++) {
-        for (int col = 0; col < ydims[2]; col++) {
+    for (int row = 0; row < ydims[1]; row++) {
+      for (int col = 0; col < ydims[2]; col++) {
+        for (int m = 0; m < M; m++) {  
           sum = 0.0f;
           for (int c = 0; c < C; c++) {
             sum += Ytemp[getYtempIdx(row,col,c,m)];
           }
           Y[getYIdx(i,row,col,m)] = sum;
-          if (sum > 0) printf("Y[%d,%d,%d,%d] = %f\n", i,row,col,m,Y[getYIdx(i,row,col,m)]);
+          //if (sum > 0) printf("Y[%d,%d,%d,%d] = Y[%d] = %f\n", i,row,col,m, getYIdx(i,row,col,m), Y[getYIdx(i,row,col,m)]);
         }
       }
     }
@@ -462,57 +464,65 @@ __global__ void convolve(const float *X, const int xdims[4],
   tx = threadIdx.x;
   ty = threadIdx.y;
   tz = threadIdx.z;
-  int m = blockIdx.x * blockDim.x + tx;
-  int h = (blockIdx.z / W_grid) * TILE_SIZE + tz;
-  int w = (blockIdx.z % W_grid) * TILE_SIZE + ty;
+  const int m = blockIdx.x * blockDim.x + tx;
+  const int h = (blockIdx.z / W_grid) * TILE_SIZE + tz;
+  const int w = (blockIdx.z % W_grid) * TILE_SIZE + ty;
       
-  if (h < ydims[1] && w < ydims[2]) {
-    int c = blockIdx.y; // each thread does a convolution of X[n, h:h+5, w:w+5,m] with W[:, :, c, m]
-    
-    auto getWIdx = [wdims] (int p, int q, int c, int m) {
-        return p * wdims[1] * wdims[2] * wdims[3] +
-               q * wdims[2] * wdims[3] + c * wdims[3] + m;
-    };
-    auto getXIdx = [xdims] (int i, int y, int x, int z) {
-        //printf("Accessing X[%d,%d,%d,%d] = X[%d]\n", i, y, x, z, i * xdims[1] * xdims[2] * xdims[3] + y * xdims[2] * xdims[3] + x * xdims[3] + z );
-        return i * xdims[1] * xdims[2] * xdims[3] + y * xdims[2] * xdims[3] + x * xdims[3] + z;
-    };
-    auto getYIdx = [ydims] (int n, int row, int col, int c, int m ) {
-      /*printf("Accessing Y[%d,%d,%d,%d,%d] = Y[%d]\n", n, row, col, c, m,
-            (n * ydims[1] * ydims[2] * blockDim.y * blockDim.x * gridDim.x) + 
-             (row * ydims[2] * blockDim.y * blockDim.x * gridDim.x) + 
-             (col * blockDim.y * blockDim.x * gridDim.x) + 
-             (c * blockDim.x * gridDim.x) + 
-             m);*/
-      return (n * ydims[1] * ydims[2] * gridDim.y * blockDim.x * gridDim.x) + 
-             (row * ydims[2] * gridDim.y * blockDim.x * gridDim.x) + 
-             (col * gridDim.y * blockDim.x * gridDim.x) + 
-             (c * blockDim.x * gridDim.x) + 
-             m;
-    };
-
-    const int input_TILE_SIZE = TILE_SIZE + FILTER_SIZE - 1; // ASSUMES :  TILE_SIZE + FILTER_SIZE - 1 < 2*TILE_SIZE 
-    
-    __shared__ float sharedX[input_TILE_SIZE][input_TILE_SIZE];
-    __shared__ float sharedW[FILTER_SIZE][FILTER_SIZE][MperBlock];
-
-    if (threadIdx.x == 0) {
-      /*if(threadIdx.y == 0 && threadIdx.z == 0)
-      printf("bd.x = %d, bd.y = %d, bd.z = %d, gd.x = %d", blockDim.x, blockDim.y, blockDim.z, gridDim.x);*/
+  const int c = blockIdx.y; // each thread does a convolution of X[n, h:h+5, w:w+5,m] with W[:, :, c, m]
   
-      if (h < xdims[1] && w < xdims[2]) sharedX[tz][ty] = X[getXIdx(n,h,w,c)];
-      if (tz < FILTER_SIZE - 1 && ty < FILTER_SIZE - 1 && h+blockDim.z < xdims[1] && w+blockDim.y < xdims[2]) 
-          sharedX[tz + blockDim.z][ty + blockDim.y] = X[getXIdx(n, h+blockDim.z, w+blockDim.y, c)]; // TILE_SIZE + FILTER_SIZE - 1 < 2*TILE_SIZE 
-    }
-    if (tz < filter_h && ty < filter_w) sharedW[tz][ty][tx] = W[getWIdx(tz, ty, c, m)]; // ASSUMES : blockdim.z, blockdim.y >= filter_h,filter_w
+  auto getWIdx = [wdims] (int p, int q, int c, int m) {
+      return p * wdims[1] * wdims[2] * wdims[3] +
+             q * wdims[2] * wdims[3] + c * wdims[3] + m;
+  };
+  auto getXIdx = [xdims] (int i, int y, int x, int z) {
+      //printf("Accessing X[%d,%d,%d,%d] = X[%d]\n", i, y, x, z, i * xdims[1] * xdims[2] * xdims[3] + y * xdims[2] * xdims[3] + x * xdims[3] + z );
+      return i * xdims[1] * xdims[2] * xdims[3] + y * xdims[2] * xdims[3] + x * xdims[3] + z;
+  };
+  auto getYIdx = [ydims, xdims] (int n, int row, int col, int c, int m ) {
+    /*printf("Accessing Y[%d,%d,%d,%d,%d] = Y[%d]\n", n, row, col, c, m,
+          (n * ydims[1] * ydims[2] * blockDim.y * blockDim.x * gridDim.x) + 
+           (row * ydims[2] * blockDim.y * blockDim.x * gridDim.x) + 
+           (col * blockDim.y * blockDim.x * gridDim.x) + 
+           (c * blockDim.x * gridDim.x) + 
+           m);*/
+    return (n * ydims[1] * ydims[2] * xdims[3] * ydims[3]) + 
+           (row * ydims[2] * xdims[3] * ydims[3]) + 
+           (col * xdims[3] * ydims[3]) + 
+           (c * ydims[3]) + 
+           m;
+  };
+
+  const int input_TILE_SIZE = TILE_SIZE + FILTER_SIZE - 1; // ASSUMES :  TILE_SIZE + FILTER_SIZE - 1 < 2*TILE_SIZE 
+  
+  __shared__ float sharedX[input_TILE_SIZE][input_TILE_SIZE];
+  __shared__ float sharedW[FILTER_SIZE][FILTER_SIZE][MperBlock];
+
+  if (tx == 0) {
+    /*if(threadIdx.y == 0 && threadIdx.z == 0)
+    printf("bd.x = %d, bd.y = %d, bd.z = %d, gd.x = %d", blockDim.x, blockDim.y, blockDim.z, gridDim.x);*/
+
+    if (h < xdims[1] && w < xdims[2]) sharedX[tz][ty] = X[getXIdx(n,h,w,c)];
+    else sharedX[tz][ty] = 0;
+    if (tz +blockDim.z < input_TILE_SIZE && ty+blockDim.y < input_TILE_SIZE) {
+      if (h+blockDim.z < xdims[1] && w+blockDim.y < xdims[2]) sharedX[tz + blockDim.z][ty + blockDim.y] = X[getXIdx(n, h+blockDim.z, w+blockDim.y, c)]; // TILE_SIZE + FILTER_SIZE - 1 < 2*TILE_SIZE 
+      else sharedX[tz + blockDim.z][ty + blockDim.y] = 0;
     
-    __syncthreads();
+    } 
+  }
+  if (tz < FILTER_SIZE && ty < FILTER_SIZE) {
+    sharedW[tz][ty][tx] = W[getWIdx(tz, ty, c, m)]; // ASSUMES : blockdim.z, blockdim.y >= filter_h,filter_w
+  }
+  
+  __syncthreads();
+
+  if (h < ydims[1] && w < ydims[2]) {
 
     float sum = 0.0f;
 
     for (int p = 0; p < filter_h; p++) {
       for (int q = 0; q < filter_w; q++) {
-        sum += sharedX[tz + p][ty + q] * sharedW[p][q][tx];
+        //sum += sharedX[tz + p][ty + q] * sharedW[p][q][tx];
+        sum += X[getXIdx(n,h+p,w+q,c)] * W[getWIdx(p,q,c,m)];
       }
     }
     Y[getYIdx(n,h,w,c,m)] = sum;
@@ -547,8 +557,8 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   const int cdims[] = {bdims[0], (bdims[1] - conv2dims[0] + 1),
                        (bdims[2] - conv2dims[1] + 1), conv2dims[3]};
   auto c = zeros<float>(cdims);
-  convolveWrapper(b, bdims, conv2, conv2dims, c, cdims);
-  //easyConvWrapper(b, bdims, conv2, conv2dims, c, cdims);
+  //convolveWrapper(b, bdims, conv2, conv2dims, c, cdims, false);
+  easyConvWrapper(b, bdims, conv2, conv2dims, c, cdims);
   //conv_forward_valid(b, bdims, conv2, conv2dims, c, cdims);
   // relu
   relu4(c, cdims);
