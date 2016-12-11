@@ -374,10 +374,7 @@ void convolveWrapper(const float *X, const int xdims[4],
   int sizeY = multiplyArr(ydims, 4) * C * sizeof(float); // for each output_feature map element, all the c different values
                                                                // are stored in different locations, and the CPU will sum them
                                                               // we'll store them like Y[i,y,x,c,m] in device, and Y[y,x,c,m] in a temp arr on host
-  int sizeW = multiplyArr(wdims, 4) * sizeof(float);
-  
-  printf("sizeX = %d, sizeY = %d, sizeW = %d\n", sizeX, sizeY, sizeW);
-  
+  int sizeW = multiplyArr(wdims, 4) * sizeof(float);  
 
   float* deviceX;
   float* deviceY;
@@ -415,7 +412,6 @@ void convolveWrapper(const float *X, const int xdims[4],
     return row * (ydims[2] * C * M) + col * (C * M) + c * M + m;
   };
 
-  printf("M/MperBlock = %d\n",(M/MperBlock));
   dim3 gridDim((M/MperBlock),C,Z); // ASSUMES - that M is a multiple of 16
   dim3 blockDim(MperBlock,TILE_SIZE,TILE_SIZE);
   
@@ -438,7 +434,6 @@ void convolveWrapper(const float *X, const int xdims[4],
             sum += Ytemp[getYtempIdx(row,col,c,m)];
           }
           Y[getYIdx(i,row,col,m)] = sum;
-          //if (sum > 0) printf("Y[%d,%d,%d,%d] = Y[%d] = %f\n", i,row,col,m, getYIdx(i,row,col,m), Y[getYIdx(i,row,col,m)]);
         }
       }
     }
@@ -475,16 +470,9 @@ __global__ void convolve(const float *X, const int xdims[4],
              q * wdims[2] * wdims[3] + c * wdims[3] + m;
   };
   auto getXIdx = [xdims] (int i, int y, int x, int z) {
-      //printf("Accessing X[%d,%d,%d,%d] = X[%d]\n", i, y, x, z, i * xdims[1] * xdims[2] * xdims[3] + y * xdims[2] * xdims[3] + x * xdims[3] + z );
       return i * xdims[1] * xdims[2] * xdims[3] + y * xdims[2] * xdims[3] + x * xdims[3] + z;
   };
   auto getYIdx = [ydims, xdims] (int n, int row, int col, int c, int m ) {
-    /*printf("Accessing Y[%d,%d,%d,%d,%d] = Y[%d]\n", n, row, col, c, m,
-          (n * ydims[1] * ydims[2] * blockDim.y * blockDim.x * gridDim.x) + 
-           (row * ydims[2] * blockDim.y * blockDim.x * gridDim.x) + 
-           (col * blockDim.y * blockDim.x * gridDim.x) + 
-           (c * blockDim.x * gridDim.x) + 
-           m);*/
     return (n * ydims[1] * ydims[2] * xdims[3] * ydims[3]) + 
            (row * ydims[2] * xdims[3] * ydims[3]) + 
            (col * xdims[3] * ydims[3]) + 
@@ -498,16 +486,8 @@ __global__ void convolve(const float *X, const int xdims[4],
   __shared__ float sharedW[FILTER_SIZE][FILTER_SIZE][MperBlock];
 
   if (tx == 0) {
-    /*if(threadIdx.y == 0 && threadIdx.z == 0)
-    printf("bd.x = %d, bd.y = %d, bd.z = %d, gd.x = %d", blockDim.x, blockDim.y, blockDim.z, gridDim.x);*/
-
     if (h < xdims[1] && w < xdims[2]) sharedX[tz][ty] = X[getXIdx(n,h,w,c)];
-    else sharedX[tz][ty] = 0;
-    if (tz +blockDim.z < input_TILE_SIZE && ty+blockDim.y < input_TILE_SIZE) {
-      if (h+blockDim.z < xdims[1] && w+blockDim.y < xdims[2]) sharedX[tz + blockDim.z][ty + blockDim.y] = X[getXIdx(n, h+blockDim.z, w+blockDim.y, c)]; // TILE_SIZE + FILTER_SIZE - 1 < 2*TILE_SIZE 
-      else sharedX[tz + blockDim.z][ty + blockDim.y] = 0;
-    
-    } 
+    else sharedX[tz][ty] = 0.0f;
   }
   if (tz < FILTER_SIZE && ty < FILTER_SIZE) {
     sharedW[tz][ty][tx] = W[getWIdx(tz, ty, c, m)]; // ASSUMES : blockdim.z, blockdim.y >= filter_h,filter_w
@@ -515,13 +495,17 @@ __global__ void convolve(const float *X, const int xdims[4],
   
   __syncthreads();
 
+
   if (h < ydims[1] && w < ydims[2]) {
 
     float sum = 0.0f;
 
     for (int p = 0; p < filter_h; p++) {
       for (int q = 0; q < filter_w; q++) {
-        //sum += sharedX[tz + p][ty + q] * sharedW[p][q][tx];
+        //if (sharedW[p][q][tx] != W[getWIdx(p,q,c,m)]) printf("sharedW and W not equal\n");
+        if (tz+p < TILE_SIZE && ty + q < TILE_SIZE)
+        sum += sharedX[tz + p][ty + q] * sharedW[p][q][tx];
+        else
         sum += X[getXIdx(n,h+p,w+q,c)] * W[getWIdx(p,q,c,m)];
       }
     }
