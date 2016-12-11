@@ -387,7 +387,9 @@ void convolveWrapper(const float *X, const int xdims[4],
   int elementsYPerImage = ydims[1] * ydims[2] * xdims[3] * ydims[3];
   int sizeYperImage = elementsYPerImage * sizeof(float);
   
-  float* Ytemp = (float*) malloc(sizeYperImage); 
+  float* Ytemp;
+  wbCheck(cudaMallocHost(&Ytemp, sizeY)); 
+  
   wbCheck(cudaMalloc(&deviceX, sizeX));
   wbCheck(cudaMalloc(&deviceW, sizeW));
   wbCheck(cudaMalloc(&deviceY, sizeY));
@@ -408,14 +410,17 @@ void convolveWrapper(const float *X, const int xdims[4],
   auto getYIdx = [ydims] (int i, int row, int col, int num_feature_map) {
     return ((i * ydims[1] + row) * ydims[2] + col) * ydims[3] + num_feature_map;
   };
-  auto getYtempIdx = [ydims, C, M] (int row, int col, int c, int m) {
-    return row * (ydims[2] * C * M) + col * (C * M) + c * M + m;
+  auto getYtempIdx = [ydims, C, M] (int i, int row, int col, int c, int m) {
+    return i * (ydims[1] * ydims[2] * C * M) + row * (ydims[2] * C * M) + col * (C * M) + c * M + m;
   };
 
   dim3 gridDim((M/MperBlock),C,Z); // ASSUMES - that M is a multiple of 16
   dim3 blockDim(MperBlock,TILE_SIZE,TILE_SIZE);
   
-  
+  cudaStream_t stream[10];
+  for(int i = 0; i < 10; i++) {
+    cudaStreamCreate(&(stream[i]));
+  }
   float sum;
   // maybe use 2 streams here..and memcpyAsync send the odd numbered kernel calls and the memcpy on the the first stream
   // even numbered kernel calls and memcpy to second stream
@@ -423,25 +428,29 @@ void convolveWrapper(const float *X, const int xdims[4],
   // right now we're blocking until we've copied back the results and done the sum
 
   for (int i = 0; i < num_images; i++) {
-    convolve<<<gridDim, blockDim>>>(deviceX, deviceXDims, deviceW, deviceWDims, deviceY, deviceYDims, W_grid, i);
-    if (C > 1) {   
-      cudaMemcpy(Ytemp, &(deviceY[i*elementsYPerImage]), sizeYperImage, cudaMemcpyDeviceToHost);
-      // Sum across C
+    convolve<<<gridDim, blockDim, 0, stream[i]>>>(deviceX, deviceXDims, deviceW, deviceWDims, deviceY, deviceYDims, W_grid, i);
+    if (C > 1) cudaMemcpyAsync(&(Ytemp[i*elementsYPerImage]), &(deviceY[i*elementsYPerImage]), sizeYperImage, cudaMemcpyDeviceToHost, stream[i]);
+    else cudaMemcpyAsync(&(Y[i*elementsYPerImage]), &(deviceY[i*elementsYPerImage]), sizeYperImage, cudaMemcpyDeviceToHost, stream[i]);
+  }
+
+  for (int i = 0; i < num_images; i++) {
+    cudaStreamSynchronize(stream[i]);
+    // Sum across C
+    if (C > 1) {  
       for (int row = 0; row < ydims[1]; row++) {
         for (int col = 0; col < ydims[2]; col++) {
           for (int m = 0; m < M; m++) {  
             sum = 0.0f;
             for (int c = 0; c < C; c++) {
-              sum += Ytemp[getYtempIdx(row,col,c,m)];
+              sum += Ytemp[getYtempIdx(i, row,col,c,m)];
             }
             Y[getYIdx(i,row,col,m)] = sum;
           }
         }
       }
     }
-    else cudaMemcpy(&(Y[i*elementsYPerImage]), &(deviceY[i*elementsYPerImage]), sizeYperImage, cudaMemcpyDeviceToHost);
-
   }
+
   wbCheck(cudaFree(deviceX));
   wbCheck(cudaFree(deviceY));
   wbCheck(cudaFree(deviceW));
