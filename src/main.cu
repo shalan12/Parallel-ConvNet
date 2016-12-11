@@ -424,19 +424,23 @@ void convolveWrapper(const float *X, const int xdims[4],
 
   for (int i = 0; i < num_images; i++) {
     convolve<<<gridDim, blockDim>>>(deviceX, deviceXDims, deviceW, deviceWDims, deviceY, deviceYDims, W_grid, i);
-    cudaMemcpy(Ytemp, &(deviceY[i*elementsYPerImage]), sizeYperImage, cudaMemcpyDeviceToHost);
-    // Sum across C
-    for (int row = 0; row < ydims[1]; row++) {
-      for (int col = 0; col < ydims[2]; col++) {
-        for (int m = 0; m < M; m++) {  
-          sum = 0.0f;
-          for (int c = 0; c < C; c++) {
-            sum += Ytemp[getYtempIdx(row,col,c,m)];
+    if (C > 1) {   
+      cudaMemcpy(Ytemp, &(deviceY[i*elementsYPerImage]), sizeYperImage, cudaMemcpyDeviceToHost);
+      // Sum across C
+      for (int row = 0; row < ydims[1]; row++) {
+        for (int col = 0; col < ydims[2]; col++) {
+          for (int m = 0; m < M; m++) {  
+            sum = 0.0f;
+            for (int c = 0; c < C; c++) {
+              sum += Ytemp[getYtempIdx(row,col,c,m)];
+            }
+            Y[getYIdx(i,row,col,m)] = sum;
           }
-          Y[getYIdx(i,row,col,m)] = sum;
         }
       }
     }
+    else cudaMemcpy(&(Y[i*elementsYPerImage]), &(deviceY[i*elementsYPerImage]), sizeYperImage, cudaMemcpyDeviceToHost);
+
   }
   wbCheck(cudaFree(deviceX));
   wbCheck(cudaFree(deviceY));
@@ -541,8 +545,8 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   const int cdims[] = {bdims[0], (bdims[1] - conv2dims[0] + 1),
                        (bdims[2] - conv2dims[1] + 1), conv2dims[3]};
   auto c = zeros<float>(cdims);
-  //convolveWrapper(b, bdims, conv2, conv2dims, c, cdims, false);
-  easyConvWrapper(b, bdims, conv2, conv2dims, c, cdims);
+  convolveWrapper(b, bdims, conv2, conv2dims, c, cdims, false);
+  //easyConvWrapper(b, bdims, conv2, conv2dims, c, cdims);
   //conv_forward_valid(b, bdims, conv2, conv2dims, c, cdims);
   // relu
   relu4(c, cdims);
