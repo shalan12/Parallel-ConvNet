@@ -345,6 +345,8 @@ __global__ void tiledConv (const float *X, const int xdims[4],
   const int xTileSize = TILE_SIZE + wdims[FILTER_HEIGHT_IDX] -1;
   const int xHeight = xdims[1];
   const int xWidth = xdims[2];
+  const int yHeight = ydims[1];
+  const int yWidth = ydims[2];
   
 
   //Anonymous functions to make accessing arrays easier (and hopefully less buggy) 
@@ -376,7 +378,7 @@ __global__ void tiledConv (const float *X, const int xdims[4],
 
 
   //Looping through all the input channels
-  if(h < ydims[1] && w < ydims[2]){
+  if(h < yHeight && w < yWidth){
     float acc = 0.0f;
     for(c = 0; c < C; c++){
 
@@ -386,21 +388,21 @@ __global__ void tiledConv (const float *X, const int xdims[4],
       } 
       __syncthreads();
 
-      //Loading X into shared memory
+      //Loading X into shared memory: THERE IS A BUG HERE
       for(int i = h; i < h_base + xTileSize; i+=TILE_SIZE){
         for(int j = w; j < w_base + xTileSize; j+= TILE_SIZE){
           if((i - h_base < xTileSize) && (j-w_base < xTileSize))
             xShared[(i-h_base) * xTileSize + (j-w_base)] = X[getXIdx(n, i, j, c)]; //@TODO: Definitely check this one
         }
       }
-      __syncthreads();
+      __syncthreads(); 
 
       //Performing the convolution
       for(p = 0; p < filter_h; p++){
         for(q = 0; q < filter_w; q++){
           //check for out of bounds
-          if((h0+p < xTileSize) && (w0 + q < xTileSize))
-            acc += xShared[(h0+p)*xTileSize + (w0+q)] * wShared[(p*filter_w) + q];
+          if((h0+p < xHeight) && (w0 + p < xWidth))
+            acc += X[getXIdx(n, h + p, w + q, c)] * wShared[(p*filter_w) + q];
         }
       }
       __syncthreads();
@@ -519,6 +521,7 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   const int cdims[] = {bdims[0], (bdims[1] - conv2dims[0] + 1),
                        (bdims[2] - conv2dims[1] + 1), conv2dims[3]};
   auto c = zeros<float>(cdims);
+  printf("Starting Second Convolution\n");
   tiledConvWrapper(b, bdims, conv2, conv2dims, c, cdims);
   //conv_forward_valid(b, bdims, conv2, conv2dims, c, cdims);
   // relu
