@@ -378,15 +378,13 @@ __global__ void tiledConv (const float *X, const int xdims[4],
 
 
   //Looping through all the input channels
-  if(h < yHeight && w < yWidth){
     float acc = 0.0f;
     for(c = 0; c < C; c++){
 
       //Loading the filter into shared memory
       if(w0 < filter_w && h0 < filter_h){
-        wShared[(h0*filter_w) + w0 ] = W[getWIdx(h0, w0, c, m)]; //@TODO: Check this to make sure that it's correct
-      } 
-      __syncthreads();
+        wShared[(h0*filter_w) + w0 ] = W[getWIdx(h0, w0, c, m)];
+      }
 
       //Loading X into shared memory: THERE IS A BUG HERE
       for(int i = h; i < h_base + xTileSize; i+=TILE_SIZE){
@@ -395,20 +393,21 @@ __global__ void tiledConv (const float *X, const int xdims[4],
             xShared[(i-h_base) * xTileSize + (j-w_base)] = X[getXIdx(n, i, j, c)]; //@TODO: Definitely check this one
         }
       }
-      __syncthreads(); 
+      __syncthreads(); //Only need the arrays to be synced here. Loads to W and X can happen however
 
       //Performing the convolution
       for(p = 0; p < filter_h; p++){
         for(q = 0; q < filter_w; q++){
           //check for out of bounds
           if((h0+p < xHeight) && (w0 + p < xWidth))
-            acc += X[getXIdx(n, h + p, w + q, c)] * wShared[(p*filter_w) + q];
+            acc += xShared[(h0+p)*xTileSize + (w0+q)] * wShared[(p*filter_w) + q];
         }
       }
-      __syncthreads();
     }
-    Y[getYIdx(n, h, w, m)] = acc;
-  }
+    __syncthreads();
+
+    if(h < yHeight && w < yWidth)
+      Y[getYIdx(n, h, w, m)] = acc;
   
   /*if (h < ydims[1] && w < ydims[2]) {
     for (p = 0; p < filter_h; p++){ // loop over KxK  filter
