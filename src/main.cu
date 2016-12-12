@@ -369,7 +369,7 @@ __global__ void tiledConv (const float *X, const int xdims[4],
   int n, m, h, w, c, p, q, h0, w0, h_base, w_base;
   n = blockIdx.x;
   m = blockIdx.y;
-  h0 = threadIdx.y; //Modifying from the book... might be an error here!
+  h0 = threadIdx.y;
   w0 = threadIdx.x;
   h_base = (blockIdx.z / W_grid) * TILE_SIZE;
   w_base = (blockIdx.z % W_grid) * TILE_SIZE;
@@ -389,8 +389,10 @@ __global__ void tiledConv (const float *X, const int xdims[4],
       //Loading X into shared memory: THERE IS A BUG HERE
       for(int i = h; i < h_base + xTileSize; i+=TILE_SIZE){
         for(int j = w; j < w_base + xTileSize; j+= TILE_SIZE){
-          if((i - h_base < xTileSize) && (j-w_base < xTileSize))
-            xShared[(i-h_base) * xTileSize + (j-w_base)] = X[getXIdx(n, i, j, c)]; //@TODO: Definitely check this one
+          if((i < xdims[1]) && (j < xdims[2]))
+            xShared[(i-h_base) * xTileSize + (j-w_base)] = X[getXIdx(n, i, j, c)];
+          else
+            xShared[(i-h_base)*xTileSize + (j-w_base)] = 0.0f;
         }
       }
       __syncthreads(); //Only need the arrays to be synced here. Loads to W and X can happen however
@@ -408,21 +410,6 @@ __global__ void tiledConv (const float *X, const int xdims[4],
 
     if(h < yHeight && w < yWidth)
       Y[getYIdx(n, h, w, m)] = acc;
-  
-  /*if (h < ydims[1] && w < ydims[2]) {
-    for (p = 0; p < filter_h; p++){ // loop over KxK  filter
-      for (q = 0; q < filter_w; q++){  
-        for (c = 0;  c < C; c++) { // sum over all input feature maps      
-            if (h+p < xdims[1] && w+q < xdims[2]) {
-              acc += (X[getXIdx(n, h + p, w + q, c)] * W[getWIdx(p, q, c, m)]);
-              //printf("X[%d,%d,%d,%d] = %f, W[%d,%d,%d,%d] = %f\n", n,h+p,w+q,c, X[getXIdx(n, h + p, w + q, c)], p,q,c,m, W[getWIdx(p, q, c, m)]);
-            } 
-        }
-      }
-    }
-    Y[getYIdx(n, h, w, m)] = acc;
-  }*/
-  
 }
 
 // Recified linear unit 4d
