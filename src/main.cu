@@ -490,14 +490,24 @@ __global__ void convolve(const float *X, const int xdims[4],
   __shared__ float sharedW[FILTER_SIZE][FILTER_SIZE][MperBlock];
 
   if (tx == 0) {
-    if (h < xdims[1] && w < xdims[2]) sharedX[tz][ty] = X[getXIdx(n,h,w,c)];
-    else sharedX[tz][ty] = 0.0f;
+    
+      int hbase = (h-tz);
+      int wbase = w-ty;
+      for(int i = h; i < hbase + input_TILE_SIZE; i+= TILE_SIZE) {
+        for (int j = w; j < wbase + input_TILE_SIZE; j+= TILE_SIZE) {
+          if (i < xdims[1] && j < xdims[2])
+            sharedX[i-hbase][j-wbase] = X[getXIdx(n,i,j,c)];
+          else
+            sharedX[i-hbase][j-wbase] = 0.0f;
+        }
+      }
   }
   if (tz < FILTER_SIZE && ty < FILTER_SIZE) {
     sharedW[tz][ty][tx] = W[getWIdx(tz, ty, c, m)]; // ASSUMES : blockdim.z, blockdim.y >= filter_h,filter_w
   }
   
   __syncthreads();
+  
 
 
   if (h < ydims[1] && w < ydims[2]) {
@@ -506,11 +516,7 @@ __global__ void convolve(const float *X, const int xdims[4],
 
     for (int p = 0; p < filter_h; p++) {
       for (int q = 0; q < filter_w; q++) {
-        //if (sharedW[p][q][tx] != W[getWIdx(p,q,c,m)]) printf("sharedW and W not equal\n");
-        if (tz+p < TILE_SIZE && ty + q < TILE_SIZE)
         sum += sharedX[tz + p][ty + q] * sharedW[p][q][tx];
-        else
-        sum += X[getXIdx(n,h+p,w+q,c)] * W[getWIdx(p,q,c,m)];
       }
     }
     Y[getYIdx(n,h,w,c,m)] = sum;
