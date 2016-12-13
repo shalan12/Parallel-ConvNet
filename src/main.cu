@@ -404,20 +404,16 @@ void convolveWrapper(const float *X, const int xdims[4],
   wbCheck(cudaMemcpy(deviceYDims, ydims, 4 * sizeof(int), cudaMemcpyHostToDevice));
   wbCheck(cudaMemcpy(deviceWDims, wdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
   
-  //helper functions
-  auto getYIdx = [ydims] (int i, int row, int col, int num_feature_map) {
-    return ((i * ydims[1] + row) * ydims[2] + col) * ydims[3] + num_feature_map;
-  };
-
+ 
   dim3 gridDim((M/MperBlock),C,Z); // ASSUMES - that M is a multiple of 16
   dim3 blockDim(MperBlock,TILE_SIZE,TILE_SIZE);
   
-  
+
   for (int i = 0; i < num_images; i++) {
     convolve<<<gridDim, blockDim>>>(deviceX, deviceXDims, deviceW, deviceWDims, deviceY, deviceYDims, W_grid, i);
     cudaMemcpy(&(Y[i*elementsYPerImage]), &(deviceY[i*elementsYPerImage]), sizeYperImage, cudaMemcpyDeviceToHost);
   }
-
+  
   wbCheck(cudaFree(deviceX));
   wbCheck(cudaFree(deviceY));
   wbCheck(cudaFree(deviceW));
@@ -433,31 +429,16 @@ __global__ void convolve(const float *X, const int xdims[4],
                         const float *W, const int wdims[4], float *Y,
                         const int ydims[4], int W_grid, int n) {
   
-  const int filter_h  = wdims[0];
-  const int filter_w  = wdims[1];
-  int tx, ty, tz;
-  tx = threadIdx.x;
-  ty = threadIdx.y;
-  tz = threadIdx.z;
+  
+  #define tx threadIdx.x
+  #define ty threadIdx.y
+  #define tz threadIdx.z
+  
   const int m = blockIdx.x * blockDim.x + tx;
   const int h = (blockIdx.z / W_grid) * TILE_SIZE + tz;
   const int w = (blockIdx.z % W_grid) * TILE_SIZE + ty;
       
   const int c = blockIdx.y; // each thread does a convolution of X[n, h:h+5, w:w+5,m] with W[:, :, c, m]
-  
-  auto getWIdx = [wdims] (int p, int q, int c, int m) {
-      return p * wdims[1] * wdims[2] * wdims[3] +
-             q * wdims[2] * wdims[3] + c * wdims[3] + m;
-  };
-  auto getXIdx = [xdims] (int i, int y, int x, int z) {
-      return i * xdims[1] * xdims[2] * xdims[3] + y * xdims[2] * xdims[3] + x * xdims[3] + z;
-  };
-  auto getYIdx = [ydims] (int n, int row, int col, int m ) {
-    return (n * ydims[1] * ydims[2] * ydims[3]) + 
-           (row * ydims[2] * ydims[3]) + 
-           (col * ydims[3]) + 
-           m;
-  };
 
   const int input_TILE_SIZE = TILE_SIZE + FILTER_SIZE - 1; // ASSUMES :  TILE_SIZE + FILTER_SIZE - 1 < 2*TILE_SIZE 
   
@@ -471,14 +452,14 @@ __global__ void convolve(const float *X, const int xdims[4],
       for(int i = h; i < hbase + input_TILE_SIZE; i+= TILE_SIZE) {
         for (int j = w; j < wbase + input_TILE_SIZE; j+= TILE_SIZE) {
           if (i < xdims[1] && j < xdims[2])
-            sharedX[i-hbase][j-wbase] = X[getXIdx(n,i,j,c)];
+            sharedX[i-hbase][j-wbase] = X[n * xdims[1] * xdims[2] * xdims[3] + i * xdims[2] * xdims[3] + j * xdims[3] + c];
           else
             sharedX[i-hbase][j-wbase] = 0.0f;
         }
       }
   }
   if (tz < FILTER_SIZE && ty < FILTER_SIZE) {
-    sharedW[tz][ty][tx] = W[getWIdx(tz, ty, c, m)]; // ASSUMES : blockdim.z, blockdim.y >= filter_h,filter_w
+    sharedW[tz][ty][tx] = W[tz * wdims[1] * wdims[2] * wdims[3] + ty * wdims[2] * wdims[3] + c * wdims[3] + m]; // ASSUMES : blockdim.z, blockdim.y >= filter_h,filter_w
   }
   
   __syncthreads();
@@ -489,12 +470,12 @@ __global__ void convolve(const float *X, const int xdims[4],
 
     float sum = 0.0f;
 
-    for (int p = 0; p < filter_h; p++) {
-      for (int q = 0; q < filter_w; q++) {
+    for (int p = 0; p < FILTER_SIZE; p++) {
+      for (int q = 0; q < FILTER_SIZE; q++) {
         sum += sharedX[tz + p][ty + q] * sharedW[p][q][tx];
       }
     }
-    atomicAdd(&(Y[getYIdx(n,h,w,m)]), sum);
+    atomicAdd(&(Y[n * ydims[1] * ydims[2] * ydims[3] + h * ydims[2] * ydims[3] + w * ydims[3] + m]), sum);
 
   }
 
