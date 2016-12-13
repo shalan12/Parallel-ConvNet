@@ -371,7 +371,7 @@ void convolveWrapper(const float *X, const int xdims[4],
   const int Z = H_grid * W_grid; // total number of tiles  
   
   int sizeX = multiplyArr(xdims, 4) * sizeof(float);
-  int sizeY = multiplyArr(ydims, 4) * C * sizeof(float); // for each output_feature map element, all the c different values
+  int sizeY = multiplyArr(ydims, 4) * sizeof(float); // for each output_feature map element, all the c different values
                                                                // are stored in different locations, and the CPU will sum them
                                                               // we'll store them like Y[i,y,x,c,m] in device, and Y[y,x,c,m] in a temp arr on host
   int sizeW = multiplyArr(wdims, 4) * sizeof(float);  
@@ -384,10 +384,9 @@ void convolveWrapper(const float *X, const int xdims[4],
   int* deviceWDims; 
 
   // allocate memory
-  int elementsYPerImage = ydims[1] * ydims[2] * xdims[3] * ydims[3];
+  int elementsYPerImage = ydims[1] * ydims[2] * ydims[3];
   int sizeYperImage = elementsYPerImage * sizeof(float);
   
-  float* Ytemp = (float*) malloc(sizeYperImage); 
   wbCheck(cudaMalloc(&deviceX, sizeX));
   wbCheck(cudaMalloc(&deviceW, sizeW));
   wbCheck(cudaMalloc(&deviceY, sizeY));
@@ -400,6 +399,7 @@ void convolveWrapper(const float *X, const int xdims[4],
   // copy memory
   wbCheck(cudaMemcpy(deviceX, X, sizeX, cudaMemcpyHostToDevice));
   wbCheck(cudaMemcpy(deviceW, W, sizeW, cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceY, Y, sizeY, cudaMemcpyHostToDevice));
   wbCheck(cudaMemcpy(deviceXDims, xdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
   wbCheck(cudaMemcpy(deviceYDims, ydims, 4 * sizeof(int), cudaMemcpyHostToDevice));
   wbCheck(cudaMemcpy(deviceWDims, wdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
@@ -408,40 +408,16 @@ void convolveWrapper(const float *X, const int xdims[4],
   auto getYIdx = [ydims] (int i, int row, int col, int num_feature_map) {
     return ((i * ydims[1] + row) * ydims[2] + col) * ydims[3] + num_feature_map;
   };
-  auto getYtempIdx = [ydims, C, M] (int row, int col, int c, int m) {
-    return row * (ydims[2] * C * M) + col * (C * M) + c * M + m;
-  };
 
   dim3 gridDim((M/MperBlock),C,Z); // ASSUMES - that M is a multiple of 16
   dim3 blockDim(MperBlock,TILE_SIZE,TILE_SIZE);
   
   
-  float sum;
-  // maybe use 2 streams here..and memcpyAsync send the odd numbered kernel calls and the memcpy on the the first stream
-  // even numbered kernel calls and memcpy to second stream
-  // so that while we're copying the result of one kernel call and then doing the sum, the second can be scheduled
-  // right now we're blocking until we've copied back the results and done the sum
-
   for (int i = 0; i < num_images; i++) {
     convolve<<<gridDim, blockDim>>>(deviceX, deviceXDims, deviceW, deviceWDims, deviceY, deviceYDims, W_grid, i);
-    if (C > 1) {   
-      cudaMemcpy(Ytemp, &(deviceY[i*elementsYPerImage]), sizeYperImage, cudaMemcpyDeviceToHost);
-      // Sum across C
-      for (int row = 0; row < ydims[1]; row++) {
-        for (int col = 0; col < ydims[2]; col++) {
-          for (int m = 0; m < M; m++) {  
-            sum = 0.0f;
-            for (int c = 0; c < C; c++) {
-              sum += Ytemp[getYtempIdx(row,col,c,m)];
-            }
-            Y[getYIdx(i,row,col,m)] = sum;
-          }
-        }
-      }
-    }
-    else cudaMemcpy(&(Y[i*elementsYPerImage]), &(deviceY[i*elementsYPerImage]), sizeYperImage, cudaMemcpyDeviceToHost);
-
+    cudaMemcpy(&(Y[i*elementsYPerImage]), &(deviceY[i*elementsYPerImage]), sizeYperImage, cudaMemcpyDeviceToHost);
   }
+
   wbCheck(cudaFree(deviceX));
   wbCheck(cudaFree(deviceY));
   wbCheck(cudaFree(deviceW));
@@ -476,11 +452,10 @@ __global__ void convolve(const float *X, const int xdims[4],
   auto getXIdx = [xdims] (int i, int y, int x, int z) {
       return i * xdims[1] * xdims[2] * xdims[3] + y * xdims[2] * xdims[3] + x * xdims[3] + z;
   };
-  auto getYIdx = [ydims, xdims] (int n, int row, int col, int c, int m ) {
-    return (n * ydims[1] * ydims[2] * xdims[3] * ydims[3]) + 
-           (row * ydims[2] * xdims[3] * ydims[3]) + 
-           (col * xdims[3] * ydims[3]) + 
-           (c * ydims[3]) + 
+  auto getYIdx = [ydims] (int n, int row, int col, int m ) {
+    return (n * ydims[1] * ydims[2] * ydims[3]) + 
+           (row * ydims[2] * ydims[3]) + 
+           (col * ydims[3]) + 
            m;
   };
 
@@ -519,7 +494,7 @@ __global__ void convolve(const float *X, const int xdims[4],
         sum += sharedX[tz + p][ty + q] * sharedW[p][q][tx];
       }
     }
-    Y[getYIdx(n,h,w,c,m)] = sum;
+    atomicAdd(&(Y[getYIdx(n,h,w,m)]), sum);
 
   }
 
