@@ -389,7 +389,7 @@ __global__ void tiledConv (const float *X, const int xdims[4],
       //Loading X into shared memory: THERE IS A BUG HERE
       for(int i = h; i < h_base + xTileSize; i+=TILE_SIZE){
         for(int j = w; j < w_base + xTileSize; j+= TILE_SIZE){
-          if((i < xdims[1]) && (j < xdims[2]))
+          if((i < xHeight) && (j < xWidth))
             xShared[(i-h_base) * xTileSize + (j-w_base)] = X[getXIdx(n, i, j, c)];
           else
             xShared[(i-h_base)*xTileSize + (j-w_base)] = 0.0f;
@@ -402,9 +402,13 @@ __global__ void tiledConv (const float *X, const int xdims[4],
         for(q = 0; q < filter_w; q++){
           //check for out of bounds
           if((h0+p < xHeight) && (w0 + p < xWidth))
-            acc += xShared[(h0+p)*xTileSize + (w0+q)] * wShared[(p*filter_w) + q];
+            acc += xShared[(h0+p)*xTileSize + (w0+q)] * wShared[(p*filter_w) + q]; //All Shared
+            //acc += xShared[(h0+p)*xTileSize + (w0+q)] * wShared[(p*filter_w) + q]; //Only xShared
+            //acc += X[getXIdx(n, h + p, w + q, c)] * wShared[(p*filter_w) + q]; //Only wShared
+            //acc += (X[getXIdx(n, h + p, w + q, c)] * W[getWIdx(p, q, c, m)]); //Neither
         }
       }
+      __syncthreads();
     }
     __syncthreads();
 
