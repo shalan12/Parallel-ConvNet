@@ -351,13 +351,13 @@ void parallel_pool_wrapper(const float *X, const int xdims[4],
 
 __global__ void parallel_pool(const float *X, const int xdims[4],
                          const int pool_size, float *Y, const int ydims[4], int wGrid) {
-  int h_base = (blockIdx.y / wGrid) * POOL_TILE_SIZE * pool_size;
-  int w_base = (blockIdx.y % wGrid) * POOL_TILE_SIZE * pool_size;
+  int h_base = (blockIdx.y / wGrid) * POOL_TILE_SIZE;
+  int w_base = (blockIdx.y % wGrid) * POOL_TILE_SIZE;
   int h0 = threadIdx.z;
   int w0 = threadIdx.y;
   int m = blockIdx.x * blockDim.x + threadIdx.x;
-  int h = h_base + h0*pool_size;
-  int w = w_base + w0*pool_size;
+  int h = h_base + h0;
+  int w = w_base + w0;
   int n = blockIdx.z;
 
   float sum = 0.0f;
@@ -365,7 +365,7 @@ __global__ void parallel_pool(const float *X, const int xdims[4],
     for(int i = 0; i < pool_size; i++){
       for(int j = 0; j < pool_size; j++){
         if (h + i < xdims[1] && w+j < xdims[2])
-        sum += X[n * xdims[1] * xdims[2] * xdims[3] + (h + i) * xdims[2] * xdims[3] + (w+j) * xdims[3] + m]/(1.0f* pool_size* pool_size);
+        sum += X[n * xdims[1] * xdims[2] * xdims[3] + (h*pool_size + i) * xdims[2] * xdims[3] + (w * pool_size+j) * xdims[3] + m]/(1.0f* pool_size* pool_size);
       }
     }
     Y[n * ydims[1] * ydims[2] * ydims[3] + h * ydims[2] * ydims[3] + w * ydims[3] + m] = sum;
