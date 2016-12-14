@@ -327,34 +327,32 @@ void parallel_pool_wrapper(const float *X, const int xdims[4],
   int sizeX = multiplyArr(xdims, 4) * sizeof(float);
   int sizeY = multiplyArr(ydims, 4) * sizeof(float);
   
-  cudaMalloc(&deviceX, sizeX);
-  cudaMalloc(&deviceY, sizeY);
-  cudaMalloc(&deviceXDims, 4 * sizeof(int));
-  cudaMalloc(&deviceYDims, 4 * sizeof(int));
+  wbCheck(cudaMalloc(&deviceX, sizeX));
+  wbCheck(cudaMalloc(&deviceY, sizeY));
+  wbCheck(cudaMalloc(&deviceXDims, 4 * sizeof(int)));
+  wbCheck(cudaMalloc(&deviceYDims, 4 * sizeof(int)));
   
-  cudaMemcpy(deviceX, X, sizeX, cudaMemcpyHostToDevice);
-  cudaMemcpy(deviceY, Y, sizeY, cudaMemcpyHostToDevice);
-  cudaMemcpy(deviceXDims, xdims, 4 * sizeof(int), cudaMemcpyHostToDevice);
-  cudaMemcpy(deviceYDims, ydims, 4 * sizeof(int), cudaMemcpyHostToDevice);
+  wbCheck(cudaMemcpy(deviceX, X, sizeX, cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceY, Y, sizeY, cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceXDims, xdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceYDims, ydims, 4 * sizeof(int), cudaMemcpyHostToDevice));
 
 
   parallel_pool<<<gridDim, blockDim>>>(deviceX, deviceXDims, pool_size, deviceY, deviceYDims, W_grid);
 
-  cudaMemcpy(Y, deviceY, sizeY, cudaMemcpyDeviceToHost);
-  /*for (int i = 0; i < multiplyArr(ydims, 4); i++) {
-    printf("Y[%d] = %f\n", i, Y[i]);
-  }*/
+  wbCheck(cudaMemcpy(Y, deviceY, sizeY, cudaMemcpyDeviceToHost));
+  
 
-  cudaFree(deviceX);
-  cudaFree(deviceY);
-  cudaFree(deviceXDims);
-  cudaFree(deviceYDims);
+  wbCheck(cudaFree(deviceX));
+  wbCheck(cudaFree(deviceY));
+  wbCheck(cudaFree(deviceXDims));
+  wbCheck(cudaFree(deviceYDims));
 }
 
 __global__ void parallel_pool(const float *X, const int xdims[4],
                          const int pool_size, float *Y, const int ydims[4], int wGrid) {
-  int h_base = (blockIdx.y/wGrid)*POOL_TILE_SIZE;
-  int w_base = (blockIdx.y % wGrid) * POOL_TILE_SIZE;
+  int h_base = (blockIdx.y / wGrid) * POOL_TILE_SIZE * pool_size;
+  int w_base = (blockIdx.y % wGrid) * POOL_TILE_SIZE * pool_size;
   int h0 = threadIdx.z;
   int w0 = threadIdx.y;
   int m = blockIdx.x * blockDim.x + threadIdx.x;
@@ -366,7 +364,8 @@ __global__ void parallel_pool(const float *X, const int xdims[4],
   if(h < ydims[1] && w < ydims[2]){
     for(int i = 0; i < pool_size; i++){
       for(int j = 0; j < pool_size; j++){
-        sum+=X[n * xdims[1] * xdims[2] * xdims[3] + (h + i) * xdims[2] * xdims[3] + (w+j) * xdims[3] + m]/(1.0f* pool_size* pool_size);
+        if (h + i < xdims[1] && w+j < xdims[2])
+        sum += X[n * xdims[1] * xdims[2] * xdims[3] + (h + i) * xdims[2] * xdims[3] + (w+j) * xdims[3] + m]/(1.0f* pool_size* pool_size);
       }
     }
     Y[n * ydims[1] * ydims[2] * ydims[3] + h * ydims[2] * ydims[3] + w * ydims[3] + m] = sum;
