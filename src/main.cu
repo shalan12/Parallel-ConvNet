@@ -19,6 +19,8 @@
 #define TILE_SIZE 16
 #define FILTER_HEIGHT_IDX 0
 #define FILTER_WIDTH_IDX 1
+#define POOL_TILE_SIZE 4
+#define POOL_BLOCK_OUTPUT_FEATURE 32 //so all accesses in a warp are consecutive
 
 #define wbCheck(stmt)                                                     \
   do {                                                                    \
@@ -52,6 +54,10 @@ __global__ void easyConv (const float *X, const int xdims[4],
 __global__ void tiledConv (const float *X, const int xdims[4],
                                const float *W, const int wdims[4], float *Y,
                                const int ydims[4], int* W_grid1);
+void parallel_pool_wrapper(const float *X, const int xdims[4],
+                         const int pool_size, float *Y, const int ydims[4]);
+__global__ void parallel_pool(const float *X, const int xdims[4],
+                         const int pool_size, float *Y, const int ydims[4], int wGrid);
 
 static int loadData(float *x, float *y) {
   // Open the data file
@@ -204,7 +210,7 @@ void easyConvWrapper(const float *X, const int xdims[4],
   int sizeX = multiplyArr(xdims, 4)*sizeof(float);
   int sizeY = multiplyArr(ydims, 4)*sizeof(float);
   int sizeW = multiplyArr(wdims, 4)*sizeof(float);
-  printf("sizeX = %d, sizeY = %d, sizeW = %d\n", sizeX, sizeY, sizeW);
+  
   wbCheck(cudaMalloc(&deviceX, sizeX));
   wbCheck(cudaMalloc(&deviceY, sizeY));
   wbCheck(cudaMalloc(&deviceW, sizeW));
@@ -454,6 +460,69 @@ static void average_pool(const float *X, const int xdims[4],
   }
 }
 
+void parallel_pool_wrapper(const float *X, const int xdims[4],
+                         const int pool_size, float *Y, const int ydims[4]) {
+  
+  const int H_grid = ceil(float(ydims[1])/float(POOL_TILE_SIZE));
+  const int W_grid = ceil(float(ydims[2])/float(POOL_TILE_SIZE));
+  const int Z = H_grid * W_grid;
+  
+  dim3 blockDim(POOL_BLOCK_OUTPUT_FEATURE, POOL_TILE_SIZE, POOL_TILE_SIZE);
+  dim3 gridDim(ydims[3]/POOL_BLOCK_OUTPUT_FEATURE, Z ,ydims[0]); // ASSUMES 32 | M
+  
+  float* deviceX;
+  float* deviceY;
+  int* deviceXDims;
+  int* deviceYDims;
+
+  int sizeX = multiplyArr(xdims, 4) * sizeof(float);
+  int sizeY = multiplyArr(ydims, 4) * sizeof(float);
+  
+  wbCheck(cudaMalloc(&deviceX, sizeX));
+  wbCheck(cudaMalloc(&deviceY, sizeY));
+  wbCheck(cudaMalloc(&deviceXDims, 4 * sizeof(int)));
+  wbCheck(cudaMalloc(&deviceYDims, 4 * sizeof(int)));
+  
+  wbCheck(cudaMemcpy(deviceX, X, sizeX, cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceY, Y, sizeY, cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceXDims, xdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
+  wbCheck(cudaMemcpy(deviceYDims, ydims, 4 * sizeof(int), cudaMemcpyHostToDevice));
+
+
+  parallel_pool<<<gridDim, blockDim>>>(deviceX, deviceXDims, pool_size, deviceY, deviceYDims, W_grid);
+
+  wbCheck(cudaMemcpy(Y, deviceY, sizeY, cudaMemcpyDeviceToHost));
+  
+
+  wbCheck(cudaFree(deviceX));
+  wbCheck(cudaFree(deviceY));
+  wbCheck(cudaFree(deviceXDims));
+  wbCheck(cudaFree(deviceYDims));
+}
+
+__global__ void parallel_pool(const float *X, const int xdims[4],
+                         const int pool_size, float *Y, const int ydims[4], int wGrid) {
+  int h_base = (blockIdx.y / wGrid) * POOL_TILE_SIZE;
+  int w_base = (blockIdx.y % wGrid) * POOL_TILE_SIZE;
+  int h0 = threadIdx.z;
+  int w0 = threadIdx.y;
+  int m = blockIdx.x * blockDim.x + threadIdx.x;
+  int h = h_base + h0;
+  int w = w_base + w0;
+  int n = blockIdx.z;
+
+  float sum = 0.0f;
+  if(h < ydims[1] && w < ydims[2]){
+    for(int i = 0; i < pool_size; i++){
+      for(int j = 0; j < pool_size; j++){
+        if (h + i < xdims[1] && w+j < xdims[2])
+        sum += X[n * xdims[1] * xdims[2] * xdims[3] + (h*pool_size + i) * xdims[2] * xdims[3] + (w * pool_size+j) * xdims[3] + m]/(1.0f* pool_size* pool_size);
+      }
+    }
+    Y[n * ydims[1] * ydims[2] * ydims[3] + h * ydims[2] * ydims[3] + w * ydims[3] + m] = sum;
+  }
+}
+
 static void fully_forward(const float *X, const int xdims[2], float *W,
                           const int wdims[2], float *Y, const int ydims[2]) 
 {
@@ -505,7 +574,8 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   const int bdims[]   = {adims[0], adims[1] / pool_size, adims[2] / pool_size,
                        adims[3]};
   auto b = zeros<float>(bdims);
-  average_pool(a, adims, pool_size, b, bdims);
+  parallel_pool_wrapper(a, adims, pool_size, b, bdims);
+  //average_pool(a, adims, pool_size, b, bdims);
 
   // conv layer
   const int cdims[] = {bdims[0], (bdims[1] - conv2dims[0] + 1),
@@ -521,7 +591,8 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   const int ddims[] = {cdims[0], cdims[1] / pool_size, cdims[2] / pool_size,
                        cdims[3]};
   auto d = zeros<float>(ddims);
-  average_pool(c, cdims, pool_size, d, ddims);
+  parallel_pool_wrapper(c, cdims, pool_size, d, ddims);
+  //average_pool(c, cdims, pool_size, d, ddims);
 
   // reshape
   const int ddims2[] = {ddims[0], ddims[1] * ddims[2] * ddims[3]};
