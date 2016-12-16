@@ -405,15 +405,17 @@ void convolveWrapper(const float *X, const int xdims[4],
   wbCheck(cudaMemcpy(deviceWDims, wdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
   
  
-  dim3 gridDim((M/MperBlock),C,Z); // ASSUMES - that M is a multiple of 16
+  dim3 gridDim((M/MperBlock) * num_images, C, Z); // ASSUMES - that M is a multiple of 16
   dim3 blockDim(MperBlock,TILE_SIZE,TILE_SIZE);
   
 
-  for (int i = 0; i < num_images; i++) {
-    convolve<<<gridDim, blockDim>>>(deviceX, deviceXDims, deviceW, deviceWDims, deviceY, deviceYDims, W_grid, i);
-    cudaMemcpy(&(Y[i*elementsYPerImage]), &(deviceY[i*elementsYPerImage]), sizeYperImage, cudaMemcpyDeviceToHost);
-  }
+  /*for (int i = 0; i < num_images; i++) {
+    
+  }*/
   
+  convolve<<<gridDim, blockDim>>>(deviceX, deviceXDims, deviceW, deviceWDims, deviceY, deviceYDims, W_grid, num_images);
+  cudaMemcpy(Y, deviceY, sizeY, cudaMemcpyDeviceToHost);
+
   wbCheck(cudaFree(deviceX));
   wbCheck(cudaFree(deviceY));
   wbCheck(cudaFree(deviceW));
@@ -427,17 +429,17 @@ void convolveWrapper(const float *X, const int xdims[4],
 //change so each thread computes two convolutions
 __global__ void convolve(const float *X, const int xdims[4],
                         const float *W, const int wdims[4], float *Y,
-                        const int ydims[4], int W_grid, int n) {
+                        const int ydims[4], int W_grid, int num_images) {
   
   
   #define tx threadIdx.x
   #define ty threadIdx.y
   #define tz threadIdx.z
   
-  const int m = blockIdx.x * blockDim.x + tx;
+  const int m = (blockIdx.x / num_images) * blockDim.x + tx;
   const int h = (blockIdx.z / W_grid) * TILE_SIZE + tz;
   const int w = (blockIdx.z % W_grid) * TILE_SIZE + ty;
-      
+  const int n = blockIdx.x % num_images;
   const int c = blockIdx.y; // each thread does a convolution of X[n, h:h+5, w:w+5,m] with W[:, :, c, m]
 
   const int input_TILE_SIZE = TILE_SIZE + FILTER_SIZE - 1; // ASSUMES :  TILE_SIZE + FILTER_SIZE - 1 < 2*TILE_SIZE 
