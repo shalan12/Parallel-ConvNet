@@ -44,17 +44,17 @@ static int conv2dims[] = {5, 5, 32, 64}; // rows, cols, #input_feature maps, #ou
 static int fc1dims[]   = {1024, 128}; // not important for convolution or subsampling layers
 static int fc2dims[]   = {128, 10}; // not important for convolution or subsampling layers
 
-__constant__ float mask1[5][5][1][32];
+__constant__ float mask1[5][5][32];
 
 void convolveWrapper(const float *X, const int xdims[4], const float *W, const int wdims[4], float *Y,
                                   const int ydims[4], bool useConstMemory=false);
-__global__ void convolve(const float *X, const int xdims[4],
-                        const float *W, const int wdims[4], float *Y,
-                        const int ydims[4], int W_grid, int n);
+__global__ void convolve(const float *X, const int xdims[4], const float *W, const int wdims[4], float *Y,
+                         const int ydims[4], int W_grid, int n);
+__global__ void convolve1(const float *X, const int xdims[4], float *Y, const int ydims[4], int W_grid, int num_images);
+
 void easyConvWrapper (const float *X, const int xdims[4], const float *W, const int wdims[4], float *Y, const int ydims[4]);
-__global__ void easyConv (const float *X, const int xdims[4],
-                               const float *W, const int wdims[4], float *Y,
-                               const int ydims[4], int* W_grid);
+__global__ void easyConv (const float *X, const int xdims[4], const float *W, const int wdims[4], float *Y,
+                          const int ydims[4], int* W_grid);
 
 static int loadData(float *x, float *y) {
   // Open the data file
@@ -386,48 +386,42 @@ void convolveWrapper(const float *X, const int xdims[4],
   int* deviceYDims;
   int* deviceWDims; 
 
-  // allocate memory
-  int elementsYPerImage = ydims[1] * ydims[2] * ydims[3];
-  int sizeYperImage = elementsYPerImage * sizeof(float);
-  
+  // allocate memory 
   wbCheck(cudaMalloc(&deviceX, sizeX));
-
+  wbCheck(cudaMalloc(&deviceY, sizeY));
   wbCheck(cudaMalloc(&deviceXDims, 4 * sizeof(int)));
   wbCheck(cudaMalloc(&deviceYDims, 4 * sizeof(int)));
-  wbCheck(cudaMalloc(&deviceWDims, 4 * sizeof(int)));
+  
 
  
   // copy memory
   wbCheck(cudaMemcpy(deviceX, X, sizeX, cudaMemcpyHostToDevice));
-  wbCheck(cudaMemcpy(deviceW, W, sizeW, cudaMemcpyHostToDevice));
   wbCheck(cudaMemcpy(deviceY, Y, sizeY, cudaMemcpyHostToDevice));
   wbCheck(cudaMemcpy(deviceXDims, xdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
   wbCheck(cudaMemcpy(deviceYDims, ydims, 4 * sizeof(int), cudaMemcpyHostToDevice));
-  wbCheck(cudaMemcpy(deviceWDims, wdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
-  
-
-  if (useConstMemory) {  
-  }
-  else {
-    wbCheck(cudaMalloc(&deviceW, sizeW));
-    wbCheck(cudaMalloc(&deviceY, sizeY));
-  }
-  
 
   dim3 gridDim((M/MperBlock) * num_images, C, Z); // ASSUMES - that M is a multiple of 16
   dim3 blockDim(MperBlock,TILE_SIZE,TILE_SIZE);
   
 
-  /*for (int i = 0; i < num_images; i++) {
-    
-  }*/
-  
-  convolve<<<gridDim, blockDim>>>(deviceX, deviceXDims, deviceW, deviceWDims, deviceY, deviceYDims, W_grid, num_images);
+  if (useConstMemory) {  
+    wbCheck(cudaMemcpyToSymbol(mask1, W, sizeW));
+    convolve1<<<gridDim, blockDim>>>(deviceX, deviceXDims, deviceY, deviceYDims, W_grid, num_images);
+  }
+  else {
+    wbCheck(cudaMalloc(&deviceWDims, 4 * sizeof(int)));
+    wbCheck(cudaMalloc(&deviceW, sizeW));
+    wbCheck(cudaMemcpy(deviceWDims, wdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
+    wbCheck(cudaMemcpy(deviceW, W, sizeW, cudaMemcpyHostToDevice));
+    convolve<<<gridDim, blockDim>>>(deviceX, deviceXDims, deviceW, deviceWDims, deviceY, deviceYDims, W_grid, num_images);
+  }
+ 
+
   cudaMemcpy(Y, deviceY, sizeY, cudaMemcpyDeviceToHost);
 
   wbCheck(cudaFree(deviceX));
   wbCheck(cudaFree(deviceY));
-  wbCheck(cudaFree(deviceW));
+  if(!useConstMemory) wbCheck(cudaFree(deviceW));
   wbCheck(cudaFree(deviceXDims));
   wbCheck(cudaFree(deviceYDims));
   wbCheck(cudaFree(deviceWDims));
@@ -492,6 +486,57 @@ __global__ void convolve(const float *X, const int xdims[4],
 
 }
 
+__global__ void convolve1(const float *X, const int xdims[4], float *Y,
+                          const int ydims[4], int W_grid, int num_images) {
+  
+  
+  #define tx threadIdx.x
+  #define ty threadIdx.y
+  #define tz threadIdx.z
+  
+  const int m = (blockIdx.x / num_images) * blockDim.x + tx;
+  const int h = (blockIdx.z / W_grid) * TILE_SIZE + tz;
+  const int w = (blockIdx.z % W_grid) * TILE_SIZE + ty;
+  const int n = blockIdx.x % num_images;
+  const int c = blockIdx.y; // each thread does a convolution of X[n, h:h+5, w:w+5,m] with W[:, :, c, m]
+
+  const int input_TILE_SIZE = TILE_SIZE + FILTER_SIZE - 1; // ASSUMES :  TILE_SIZE + FILTER_SIZE - 1 < 2*TILE_SIZE 
+  
+  __shared__ float sharedX[input_TILE_SIZE][input_TILE_SIZE];
+
+  if (tx == 0) {
+    
+      int hbase = (h-tz);
+      int wbase = w-ty;
+      for(int i = h; i < hbase + input_TILE_SIZE; i+= TILE_SIZE) {
+        for (int j = w; j < wbase + input_TILE_SIZE; j+= TILE_SIZE) {
+          if (i < xdims[1] && j < xdims[2])
+            sharedX[i-hbase][j-wbase] = X[n * xdims[1] * xdims[2] * xdims[3] + i * xdims[2] * xdims[3] + j * xdims[3] + c];
+          else
+            sharedX[i-hbase][j-wbase] = 0.0f;
+        }
+      }
+  }
+  
+  __syncthreads();
+  
+
+  if (h < ydims[1] && w < ydims[2]) {
+
+    float sum = 0.0f;
+
+    for (int p = 0; p < FILTER_SIZE; p++) {
+      for (int q = 0; q < FILTER_SIZE; q++) {
+        sum += sharedX[tz + p][ty + q] * mask1[p][q][m];
+      }
+    }
+    atomicAdd(&(Y[n * ydims[1] * ydims[2] * ydims[3] + h * ydims[2] * ydims[3] + w * ydims[3] + m]), sum);
+
+  }
+
+}
+
+
 // Forward operation for the CNN, a combination of conv layer + average pooling
 // + relu
 void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
@@ -500,7 +545,7 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   const int adims[] = {xdims[0], (xdims[1] - conv1dims[0] + 1),
                        (xdims[2] - conv1dims[1] + 1), conv1dims[3]};
   auto a = zeros<float>(adims);
-  convolveWrapper(x, xdims, conv1, conv1dims, a, adims, false);
+  convolveWrapper(x, xdims, conv1, conv1dims, a, adims, true);
   //easyConvWrapper(x, xdims, conv1, conv1dims, a, adims);
   //conv_forward_valid(x, xdims, conv1, conv1dims, a, adims);
   
