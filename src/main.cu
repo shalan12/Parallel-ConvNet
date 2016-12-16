@@ -58,6 +58,14 @@ __global__ void parallel_pool(const float *X, const int xdims[4],
 void parallelRelu4Wrapper(float *X, const int xdims[4]);
 __global__ void parallelRelu4(float *X, const int size);
 
+void parallelFullyForwardWrapper(const float *X, const int xdims[2], float *W,
+                          const int wdims[2], float *Y, const int ydims[2]);
+
+__global__ void matrixMultiplyShared(float *A, float *B, float *C,
+                                     int numARows, int numAColumns,
+                                     int numBRows, int numBColumns,
+                                     int numCRows, int numCColumns);
+
 static int loadData(float *x, float *y) {
   // Open the data file
   const auto file_id =
@@ -401,6 +409,82 @@ __global__ void parallel_pool(const float *X, const int xdims[4],
   }
 }
 
+void parallelFullyForwardWrapper(const float *X, const int xdims[2], 
+                                       float *W, const int wdims[2], 
+                                       float *Y, const int ydims[2]){
+  //Grid Dimensions
+  dim3 dimBlock(TILE_SIZE, TILE_SIZE, 1);
+  dim3 dimGrid(ceil(float(ydims[1])/float(TILE_SIZE)), ceil(float(ydims[0])/float(TILE_SIZE)), 1);
+  
+  //Device Memory Allocation
+  float* deviceX; 
+  float* deviceW;
+  float* deviceY;
+  int sizeX, sizeY, sizeW;
+  sizeX = xdims[0]*xdims[1]*sizeof(float);
+  sizeY = ydims[0]*ydims[1]*sizeof(float);
+  sizeW = wdims[0]*wdims[1]*sizeof(float);
+  cudaMalloc(&deviceX, sizeX);
+  cudaMalloc(&deviceW, sizeW);
+  cudaMalloc(&deviceY, sizeY);
+
+  //Memcpy'ing
+   wbCheck(cudaMemcpy(deviceX, X, sizeX, cudaMemcpyHostToDevice));
+   wbCheck(cudaMemcpy(deviceW, W, sizeW, cudaMemcpyHostToDevice));
+   wbCheck(cudaMemcpy(deviceY, Y, sizeY, cudaMemcpyHostToDevice));
+
+  matrixMultiplyShared<<<dimGrid, dimBlock>>>(deviceX, deviceW, deviceY,
+                                     xdims[0], xdims[1],
+                                     wdims[0], wdims[1],
+                                     ydims[0], ydims[1]);
+  wbCheck(cudaMemcpy(Y, deviceY, sizeY, cudaMemcpyDeviceToHost));
+  for(int i = 0; i < ydims[0]*ydims[1]; i++){
+    printf("Y[%d] = %f\n",i, Y[i]);
+  }
+  //Frees
+  wbCheck(cudaFree(deviceX)); wbCheck(cudaFree(deviceY)); wbCheck(cudaFree(deviceW));
+}
+
+__device__ int divAndCeil(int n, int d) {
+  int t = n/d;  
+  return t + (n%d > 0);
+}
+
+__global__ void matrixMultiplyShared(float *A, float *B, float *C,
+                                     int numARows, int numAColumns,
+                                     int numBRows, int numBColumns,
+                                     int numCRows, int numCColumns) {
+  //@@ Insert code to implement matrix multiplication here
+  //@@ You have to use shared memory for this MP
+   
+  int bx = blockIdx.x; int tx = threadIdx.x;
+  int by = blockIdx.y; int ty = threadIdx.y;
+  int row = by*blockDim.y + ty;
+  int col = bx*blockDim.x + tx;
+  __shared__ float tileA[TILE_SIZE][TILE_SIZE];
+  __shared__ float tileB[TILE_SIZE][TILE_SIZE];
+  float sum = 0;
+  int numTiles = divAndCeil(numAColumns, TILE_SIZE);
+  for (int i = 0; i < numTiles; i++) {
+    if (i*TILE_SIZE + tx < numAColumns && row < numARows)
+      tileA[ty][tx] = A[row*numAColumns   +   i*TILE_SIZE + tx];
+    else
+      tileA[ty][tx] = 0;
+    if(i*TILE_SIZE + ty < numBRows && col < numBColumns)
+      tileB[ty][tx] = B[(i*TILE_SIZE + ty)*numBColumns    +    col];
+    else
+      tileB[ty][tx] = 0;
+    //barrier
+    __syncthreads();
+    for(int idx = 0; idx < TILE_SIZE; idx++) {
+      sum += tileA[ty][idx] * tileB[idx][tx];
+    }
+    __syncthreads();
+  }
+  C[row*numCColumns + col] = sum;
+ 
+}
+
 static void fully_forward(const float *X, const int xdims[2], float *W,
                           const int wdims[2], float *Y, const int ydims[2]) 
 {
@@ -479,7 +563,8 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   // matrix multiplication
   const int edims[] = {ddims[0], fc1dims[1]};
   auto e            = zeros<float>(edims);
-  fully_forward(d, ddims2, fc1, fc1dims, e, edims);
+  //fully_forward(d, ddims2, fc1, fc1dims, e, edims);
+  parallelFullyForwardWrapper(d, ddims2, fc1, fc1dims, e, edims);
 
   // relu
   relu2(e, edims);
@@ -488,7 +573,8 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   const int fdims[] = {edims[0], fc2dims[1]};
 
   auto f            = zeros<float>(fdims);
-  fully_forward(e, edims, fc2, fc2dims, f, fdims);
+  //fully_forward(e, edims, fc2, fc2dims, f, fdims);
+  parallelFullyForwardWrapper(e, edims, fc2, fc2dims, f, fdims);
 
   argmax(f, fdims, out);
 
