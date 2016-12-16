@@ -44,6 +44,8 @@ static int conv2dims[] = {5, 5, 32, 64}; // rows, cols, #input_feature maps, #ou
 static int fc1dims[]   = {1024, 128}; // not important for convolution or subsampling layers
 static int fc2dims[]   = {128, 10}; // not important for convolution or subsampling layers
 
+__constant__ float mask1[5][5][1][32];
+
 void convolveWrapper(const float *X, const int xdims[4], const float *W, const int wdims[4], float *Y,
                                   const int ydims[4], bool useConstMemory=false);
 __global__ void convolve(const float *X, const int xdims[4],
@@ -379,6 +381,7 @@ void convolveWrapper(const float *X, const int xdims[4],
   float* deviceX;
   float* deviceY;
   float* deviceW;
+    
   int* deviceXDims;
   int* deviceYDims;
   int* deviceWDims; 
@@ -388,8 +391,6 @@ void convolveWrapper(const float *X, const int xdims[4],
   int sizeYperImage = elementsYPerImage * sizeof(float);
   
   wbCheck(cudaMalloc(&deviceX, sizeX));
-  wbCheck(cudaMalloc(&deviceW, sizeW));
-  wbCheck(cudaMalloc(&deviceY, sizeY));
 
   wbCheck(cudaMalloc(&deviceXDims, 4 * sizeof(int)));
   wbCheck(cudaMalloc(&deviceYDims, 4 * sizeof(int)));
@@ -404,7 +405,15 @@ void convolveWrapper(const float *X, const int xdims[4],
   wbCheck(cudaMemcpy(deviceYDims, ydims, 4 * sizeof(int), cudaMemcpyHostToDevice));
   wbCheck(cudaMemcpy(deviceWDims, wdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
   
- 
+
+  if (useConstMemory) {  
+  }
+  else {
+    wbCheck(cudaMalloc(&deviceW, sizeW));
+    wbCheck(cudaMalloc(&deviceY, sizeY));
+  }
+  
+
   dim3 gridDim((M/MperBlock) * num_images, C, Z); // ASSUMES - that M is a multiple of 16
   dim3 blockDim(MperBlock,TILE_SIZE,TILE_SIZE);
   
