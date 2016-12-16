@@ -22,6 +22,8 @@
 #define POOL_TILE_SIZE 4
 #define POOL_BLOCK_OUTPUT_FEATURE 32 //so all accesses in a warp are consecutive
 
+#define RELU_TILE_SIZE 10
+
 #define wbCheck(stmt)                                                     \
   do {                                                                    \
     cudaError_t err = stmt;                                               \
@@ -58,6 +60,8 @@ void parallel_pool_wrapper(const float *X, const int xdims[4],
                          const int pool_size, float *Y, const int ydims[4]);
 __global__ void parallel_pool(const float *X, const int xdims[4],
                          const int pool_size, float *Y, const int ydims[4], int wGrid);
+void parallelRelu4Wrapper(float *X, const int xdims[4]);
+__global__ void parallelRelu4(float *X, const int size);
 
 static int loadData(float *x, float *y) {
   // Open the data file
@@ -429,6 +433,30 @@ static void relu4(float *X, const int xdims[4]) {
   }
 }
 
+void parallelRelu4Wrapper(float *X, const int xdims[4]) {
+  const int numElemsX  = multiplyArr(xdims, 4);
+  int sizeX = numElemsX * sizeof(float);
+  float * deviceX;
+  wbCheck(cudaMalloc(&deviceX, sizeX));
+  wbCheck(cudaMemcpy(deviceX, X, sizeX, cudaMemcpyHostToDevice));
+  const int numThreads = 512;
+  const int numBlocks = numElemsX/(numThreads*RELU_TILE_SIZE);
+  parallelRelu4<<<numBlocks, numThreads>>>(deviceX, numElemsX);
+  wbCheck(cudaMemcpy(X, deviceX, sizeX, cudaMemcpyDeviceToHost));
+}
+
+__global__ void parallelRelu4(float *X, const int size) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+  for (int i = 0; i < RELU_TILE_SIZE; i++) {
+    if (idx > size) break;
+    else {
+      X[idx] = (X[idx] < 0) ? 0 : X[idx];
+      idx += stride;
+    }
+  } 
+}
+
 // Recified linear unit 2d
 static void relu2(float *X, const int xdims[2]) {
   for (const auto i : range(0, xdims[0] * xdims[1])) {
@@ -567,7 +595,9 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   //conv_forward_valid(x, xdims, conv1, conv1dims, a, adims);
   
   /// relu layer
-  relu4(a, adims);
+  //relu4(a, adims);
+  parallelRelu4Wrapper(a, adims);
+
 
   // average pooling
   const int pool_size = 2;
@@ -585,8 +615,9 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   tiledConvWrapper(b, bdims, conv2, conv2dims, c, cdims);
   //conv_forward_valid(b, bdims, conv2, conv2dims, c, cdims);
   // relu
-  relu4(c, cdims);
-
+  //relu4(c, cdims);
+  parallelRelu4Wrapper(c, cdims);
+  
   // average pooling
   const int ddims[] = {cdims[0], cdims[1] / pool_size, cdims[2] / pool_size,
                        cdims[3]};
@@ -607,6 +638,7 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
 
   // matrix multiplication
   const int fdims[] = {edims[0], fc2dims[1]};
+
   auto f            = zeros<float>(fdims);
   fully_forward(e, edims, fc2, fc2dims, f, fdims);
 
