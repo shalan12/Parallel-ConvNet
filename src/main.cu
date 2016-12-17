@@ -438,9 +438,9 @@ void parallelFullyForwardWrapper(const float *X, const int xdims[2],
                                      wdims[0], wdims[1],
                                      ydims[0], ydims[1]);
   wbCheck(cudaMemcpy(Y, deviceY, sizeY, cudaMemcpyDeviceToHost));
-  for(int i = 0; i < ydims[0]*ydims[1]; i++){
+  /*for(int i = 0; i < ydims[0]*ydims[1]; i++){
     printf("Y[%d] = %f\n",i, Y[i]);
-  }
+  }*/
   //Frees
   wbCheck(cudaFree(deviceX)); wbCheck(cudaFree(deviceY)); wbCheck(cudaFree(deviceW));
 }
@@ -454,34 +454,34 @@ __global__ void matrixMultiplyShared(float *A, float *B, float *C,
                                      int numARows, int numAColumns,
                                      int numBRows, int numBColumns,
                                      int numCRows, int numCColumns) {
-  //@@ Insert code to implement matrix multiplication here
-  //@@ You have to use shared memory for this MP
-   
-  int bx = blockIdx.x; int tx = threadIdx.x;
-  int by = blockIdx.y; int ty = threadIdx.y;
-  int row = by*blockDim.y + ty;
-  int col = bx*blockDim.x + tx;
-  __shared__ float tileA[TILE_SIZE][TILE_SIZE];
-  __shared__ float tileB[TILE_SIZE][TILE_SIZE];
-  float sum = 0;
-  int numTiles = divAndCeil(numAColumns, TILE_SIZE);
-  for (int i = 0; i < numTiles; i++) {
-    if (i*TILE_SIZE + tx < numAColumns && row < numARows)
-      tileA[ty][tx] = A[row*numAColumns   +   i*TILE_SIZE + tx];
-    else
-      tileA[ty][tx] = 0;
-    if(i*TILE_SIZE + ty < numBRows && col < numBColumns)
-      tileB[ty][tx] = B[(i*TILE_SIZE + ty)*numBColumns    +    col];
-    else
-      tileB[ty][tx] = 0;
-    //barrier
-    __syncthreads();
-    for(int idx = 0; idx < TILE_SIZE; idx++) {
-      sum += tileA[ty][idx] * tileB[idx][tx];
+  //Shared Memory
+  __shared__ float subTileA[TILE_SIZE][TILE_SIZE];
+  __shared__ float subTileB[TILE_SIZE][TILE_SIZE];
+    int bx = blockIdx.x; int by = blockIdx.y;
+    int tx = threadIdx.x; int ty = threadIdx.y;
+  //Row and Column Indices
+    int Row = by * TILE_SIZE + ty;
+    int Col = bx * TILE_SIZE + tx;
+    float Pvalue = 0;
+    
+  //Cooperating to load each of the subtiles
+    for (int m = 0; m < (numAColumns+TILE_SIZE-1/TILE_SIZE); m++) { //Could have also used numBRows (this is 'width') in the example
+       if (Row < numARows && m*TILE_SIZE+tx < numAColumns) //If the index is in bounds for A
+          subTileA[ty][tx] = A[Row*numAColumns + m*TILE_SIZE+tx];
+       else
+          subTileA[ty][tx] = 0.0;
+       if (Col < numBColumns && m*TILE_SIZE+ty < numBRows) //If the index is in bounds for B
+          subTileB[ty][tx] = B[(m*TILE_SIZE+ty)*numBColumns+Col];
+       else
+          subTileB[ty][tx] = 0.0;
+
+       __syncthreads();
+       for (int k = 0; k < TILE_SIZE; k++)
+          Pvalue += subTileA[ty][k] * subTileB[k][tx];
+       __syncthreads();
     }
-    __syncthreads();
-  }
-  C[row*numCColumns + col] = sum;
+    if (Row < numCRows && Col < numCColumns)
+       C[Row*numCColumns+Col] = Pvalue;
  
 }
 
