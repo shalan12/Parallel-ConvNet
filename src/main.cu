@@ -613,10 +613,12 @@ void convolveWrapper(const float *X, const int xdims[4],
 
   wbCheck(cudaFree(deviceX));
   wbCheck(cudaFree(deviceY));
-  if(!useConstMemory) wbCheck(cudaFree(deviceW));
+  if(!useConstMemory) {
+    wbCheck(cudaFree(deviceW));
+    wbCheck(cudaFree(deviceWDims));
+  }
   wbCheck(cudaFree(deviceXDims));
   wbCheck(cudaFree(deviceYDims));
-  wbCheck(cudaFree(deviceWDims));
    
 }
 
