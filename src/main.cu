@@ -564,8 +564,8 @@ void convolveWrapper(const float *X, const int xdims[4],
   const int H_grid = ceil(float(H_out)/float(TILE_SIZE)); // number of vertical tiles per output map
   const int Z = H_grid * W_grid; // total number of tiles  
   
-  int sizeX = multiplyArr(xdims, 4) * sizeof(float);
-  int sizeY = multiplyArr(ydims, 4) * sizeof(float); // for each output_feature map element, all the c different values
+  const int sizeX = multiplyArr(xdims, 4) * sizeof(float);
+  const int sizeY = multiplyArr(ydims, 4) * sizeof(float); // for each output_feature map element, all the c different values
                                                                // are stored in different locations, and the CPU will sum them
                                                               // we'll store them like Y[i,y,x,c,m] in device, and Y[y,x,c,m] in a temp arr on host
   int sizeW = multiplyArr(wdims, 4) * sizeof(float);  
@@ -588,12 +588,13 @@ void convolveWrapper(const float *X, const int xdims[4],
  
   // copy memory
   wbCheck(cudaMemcpy(deviceX, X, sizeX, cudaMemcpyHostToDevice));
-  wbCheck(cudaMemcpy(deviceY, Y, sizeY, cudaMemcpyHostToDevice));
   wbCheck(cudaMemcpy(deviceXDims, xdims, 4 * sizeof(int), cudaMemcpyHostToDevice));
   wbCheck(cudaMemcpy(deviceYDims, ydims, 4 * sizeof(int), cudaMemcpyHostToDevice));
 
-  dim3 gridDim((M/MperBlock) * num_images, C, Z); // ASSUMES - that M is a multiple of 16
-  dim3 blockDim(MperBlock,TILE_SIZE,TILE_SIZE);
+  wbCheck(cudaMemset(deviceY, 0, sizeY));
+  
+  const dim3 gridDim((M/MperBlock) * num_images, C, Z); // ASSUMES - that M is a multiple of 16
+  const dim3 blockDim(MperBlock,TILE_SIZE,TILE_SIZE);
   
 
   if (useConstMemory) {  
@@ -786,6 +787,7 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   parallelFullyForwardWrapper(d, ddims2, fc1, fc1dims, e, edims);
 
   // relu
+  //relu2(e, edims);
   parallelRelu2Wrapper(e, edims);
 
   // matrix multiplication
