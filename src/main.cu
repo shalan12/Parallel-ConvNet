@@ -724,7 +724,7 @@ __global__ void convolve1(const float *X, const int xdims[4], float *Y,
         sum += sharedX[tz + p][ty + q] * mask1[p][q][m];
       }
     }
-    atomicAdd(&(Y[n * ydims[1] * ydims[2] * ydims[3] + h * ydims[2] * ydims[3] + w * ydims[3] + m]), sum);
+    Y[n * ydims[1] * ydims[2] * ydims[3] + h * ydims[2] * ydims[3] + w * ydims[3] + m] = sum;
 
   }
 
