@@ -530,7 +530,9 @@ void forward_operation(float *x, float *conv1, float *conv2, float *fc1,
   // conv layer
   const int adims[] = {xdims[0], (xdims[1] - conv1dims[0] + 1),
                        (xdims[2] - conv1dims[1] + 1), conv1dims[3]};
+  
   auto a = zeros<float>(adims);
+  
   easyConvWrapper(x, xdims, conv1, conv1dims, a, adims);
   //conv_forward_valid(x, xdims, conv1, conv1dims, a, adims);
   
@@ -632,8 +634,12 @@ int main(int argc, char **argv) {
   loadData(x, y);
 
   // Load model
-  float *conv1 = allocate<float>(conv1dims);
-  float *conv2 = allocate<float>(conv2dims);
+ /* float *conv1 = allocate<float>(conv1dims);
+  float *conv2 = allocate<float>(conv2dims);*/
+  float *conv1; 
+  float *conv2;
+  cudaMallocHost(&conv1, multiplyArr(conv1dims,4) * sizeof(float));
+  cudaMallocHost(&conv2, multiplyArr(conv2dims,4) * sizeof(float));
   float *fc1   = allocate<float>(fc1dims);
   float *fc2   = allocate<float>(fc2dims);
   loadModel(conv1, conv2, fc1, fc2);
@@ -670,8 +676,10 @@ int main(int argc, char **argv) {
 
   delete[] x;
   delete[] y;
-  delete[] conv1;
-  delete[] conv2;
+  // delete[] conv1;
+  // delete[] conv2;
+  cudaFreeHost(conv1);
+  cudaFreeHost(conv2);
   delete[] fc1;
   delete[] fc2;
   delete[] out;
